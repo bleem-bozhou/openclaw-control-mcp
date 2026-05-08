@@ -102,6 +102,82 @@ Restart Claude Code — `openclaw_cron_list` and friends will be available.
 | `OPENCLAW_TIMEOUT_MS` | optional | Connect / request timeout (default 30000) |
 | `OPENCLAW_DEBUG` | optional | Set to `1` to log every WS frame to stderr |
 | `OPENCLAW_CONTROL_HOME` | optional | Override the directory used to persist `store.json` (defaults to `${XDG_CONFIG_HOME:-~/.config}/openclaw-control-mcp/`). The legacy `OPENCLAW_CLAW_HOME` is still read as a fallback. |
+| `OPENCLAW_USE_KEYCHAIN` | optional | Default ON since 0.5.0 — secrets land in the OS keychain (macOS `security`, Linux `secret-tool`) when one is available, else stay in `store.json`. Set to `0` or `false` to opt out and force plain JSON. |
+| `OPENCLAW_HTTP` | optional | Set to `1` to expose the MCP over Streamable HTTP at `/mcp` instead of stdio. Equivalent to passing `--http`. |
+| `OPENCLAW_HTTP_PORT` | optional | HTTP port (default `3333`). Equivalent to `--http-port=N`. |
+| `OPENCLAW_HTTP_HOST` | optional | HTTP host (default `127.0.0.1`). Equivalent to `--http-host=H`. |
+| `OPENCLAW_MOCK` | optional | Set to `1` (or pass `--mock`) to swap the WebSocket gateway for an in-memory `MockGateway`. Lets you exercise the MCP without provisioning a real gateway — for CI, demos, or dry-runs. State is kept in-process and discarded on exit. |
+
+## Multi-instance: per-call `instance` parameter
+
+Every tool accepts an optional `instance` field so a single MCP can target several gateways without flipping the active default first:
+
+```jsonc
+// route this one call to the 'work' gateway, regardless of the active default
+{ "name": "openclaw_cron_list", "arguments": { "instance": "work", "limit": 10 } }
+```
+
+Configure each gateway with `openclaw_setup({ instance: "work", gatewayUrl, gatewayToken })`, list them with `openclaw_setup_list`, switch the active default with `openclaw_setup_select_default`. When `OPENCLAW_GATEWAY_URL` is set in the env, it overrides everything (including a `instance` arg) — the env-var path always wins.
+
+## HTTP mode
+
+For clients that don't speak stdio (Cursor, Continue, Cline, Zed, browser), run the MCP as a Streamable HTTP server:
+
+```bash
+npx -y openclaw-control-mcp --http --http-port=3333
+# or
+OPENCLAW_HTTP=1 OPENCLAW_HTTP_PORT=3333 npx -y openclaw-control-mcp
+```
+
+Endpoint: `POST/GET http://127.0.0.1:3333/mcp` (MCP Streamable HTTP, stateful — each client gets its own session id). Stdio remains the default; the HTTP server only starts when explicitly enabled.
+
+## Mock mode (no gateway required)
+
+Set `OPENCLAW_MOCK=1` (or pass `--mock`) to swap the WebSocket client for an in-memory mock. Useful for:
+
+- **CI** — run tests / demos without a live gateway.
+- **Workflow rehearsals** — dry-run a sequence of `cron.add` / `cron.update` / `config.patch` calls before pointing at prod.
+- **Onboarding** — try the MCP without provisioning a Hostinger VPS.
+
+```bash
+# stdio
+OPENCLAW_MOCK=1 npx -y openclaw-control-mcp
+# or HTTP
+OPENCLAW_MOCK=1 OPENCLAW_HTTP=1 npx -y openclaw-control-mcp
+```
+
+State (cron jobs added, config patches, sessions) is kept in-process and discarded on exit. The mock seeds one cron job (`sample-weekly`) and one session so list calls return non-empty. Methods without a canned handler return `{ mock: true, ok: true }` so nothing crashes — extend `src/gateway/mock.ts` to specialise additional methods.
+
+## Cron templates (no schedule syntax to remember)
+
+Four wrappers on top of `cron.add` synthesize the wire format for the most common cases:
+
+```jsonc
+// every Friday at 09:00 Paris, send a weekly digest to a Telegram channel
+{ "name": "openclaw_cron_add_weekly", "arguments": {
+    "name": "weekly-digest", "dayOfWeek": "fri", "hour": 9, "minute": 0,
+    "tz": "Europe/Paris", "message": "Compose the weekly digest …",
+    "channel": "telegram", "to": "-1001234567890"
+}}
+
+// every day at 07:00 UTC
+{ "name": "openclaw_cron_add_daily", "arguments": {
+    "name": "morning-check", "hour": 7, "tz": "UTC", "message": "Run the morning checks."
+}}
+
+// every 15 minutes (clock-agnostic)
+{ "name": "openclaw_cron_add_every", "arguments": {
+    "name": "ping", "intervalMinutes": 15, "message": "ping the upstream"
+}}
+
+// one-shot reminder, auto-deletes after firing
+{ "name": "openclaw_cron_add_once", "arguments": {
+    "name": "remind-meeting", "at": "2026-12-25T09:00:00+01:00",
+    "message": "Don't forget the holiday call."
+}}
+```
+
+All four take the standard knobs: `agentId?`, `model?`, `timeoutSeconds?` (default 900), `channel? + to?`, `deliveryMode?` (`announce` | `direct` | `none`), `instance?`.
 
 ## Tools
 
@@ -286,6 +362,11 @@ If you used the wrapper under its previous name (`openclaw-claw-mcp`):
 - On the next successful connect, the new path (`~/.config/openclaw-control-mcp/store.json`) is created. You can then delete the old directory.
 - Update the entry name in `~/.claude.json` from `openclaw-claw` to `openclaw-control` (purely cosmetic — only changes the tool prefix `mcp__openclaw-control__*`).
 - The local working dir / build output keeps the same path you cloned to; nothing else needs moving.
+
+## Troubleshooting
+
+- **`gateway request '…' failed: expected Uint8Array of length 32, got length=0`** — the persisted `device.privateKey` is empty (keychain backend silently failed at `stripSecretsToKeychain`). Workaround + proposed fixes: [`docs/troubleshooting/empty-private-key.md`](./docs/troubleshooting/empty-private-key.md).
+- **`gateway request '…' failed: device nonce mismatch`** after some idle time — the WS connection went stale and the retry loop reuses a burned nonce. Workaround: re-call `openclaw_setup` with the same params (forces a fresh handshake). Details + proposed fixes: [`docs/troubleshooting/stale-connection-nonce-mismatch.md`](./docs/troubleshooting/stale-connection-nonce-mismatch.md).
 
 ## Caveats
 
