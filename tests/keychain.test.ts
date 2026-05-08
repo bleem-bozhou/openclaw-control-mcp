@@ -23,21 +23,29 @@ class InMemoryKeychain implements KeychainBackend {
   }
 }
 
-describe("maybeKeychainBackend env-gating", () => {
+describe("maybeKeychainBackend env-gating (default ON since 0.5.0)", () => {
   const original = process.env.OPENCLAW_USE_KEYCHAIN;
   afterEach(() => {
     if (original === undefined) delete process.env.OPENCLAW_USE_KEYCHAIN;
     else process.env.OPENCLAW_USE_KEYCHAIN = original;
   });
 
-  it("returns null when OPENCLAW_USE_KEYCHAIN is unset", async () => {
-    delete process.env.OPENCLAW_USE_KEYCHAIN;
+  it("returns null when explicitly opted out via '0'", async () => {
+    process.env.OPENCLAW_USE_KEYCHAIN = "0";
     expect(await maybeKeychainBackend()).toBeNull();
   });
 
-  it("returns null when OPENCLAW_USE_KEYCHAIN is not '1'", async () => {
-    process.env.OPENCLAW_USE_KEYCHAIN = "yes";
+  it("returns null when explicitly opted out via 'false'", async () => {
+    process.env.OPENCLAW_USE_KEYCHAIN = "false";
     expect(await maybeKeychainBackend()).toBeNull();
+  });
+
+  it("when unset, returns the active backend (or null on hosts with no keychain CLI)", async () => {
+    delete process.env.OPENCLAW_USE_KEYCHAIN;
+    const backend = await maybeKeychainBackend();
+    // On macOS CI we expect macos-security; on Linux without secret-tool we expect null.
+    // Either way a Noop must NOT be returned (hidden by maybeKeychainBackend).
+    if (backend) expect(backend.id).not.toBe("noop");
   });
 });
 

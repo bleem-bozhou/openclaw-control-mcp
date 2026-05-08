@@ -1,6 +1,9 @@
 #!/usr/bin/env node
+import { createServer as createHttpServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -8,7 +11,9 @@ import {
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { formatAgo } from "./format.js";
 import { GatewayClient } from "./gateway/client.js";
+import { MockGateway } from "./gateway/mock.js";
 import { Store } from "./gateway/store.js";
+import type { CallOpts, ToolClient } from "./tools/client.js";
 import { getMcpVersion } from "./version.js";
 import { buildAdminTools } from "./tools/admin.js";
 import { buildAgentsTools } from "./tools/agents.js";
@@ -16,6 +21,7 @@ import { buildChannelsTools } from "./tools/channels.js";
 import { buildChatTools } from "./tools/chat.js";
 import { buildConfigTools } from "./tools/config.js";
 import { buildCronTools, type ToolDef } from "./tools/cron.js";
+import { buildCronTemplateTools } from "./tools/cronTemplates.js";
 import { buildDeviceTools } from "./tools/device.js";
 import { buildDoctorTools } from "./tools/doctor.js";
 import { buildExecApprovalTools } from "./tools/execApproval.js";
@@ -41,6 +47,10 @@ const ENV_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN?.trim() || undefined;
 const ENV_PASSWORD = process.env.OPENCLAW_GATEWAY_PASSWORD?.trim() || undefined;
 const TIMEOUT = process.env.OPENCLAW_TIMEOUT_MS ? Number(process.env.OPENCLAW_TIMEOUT_MS) : undefined;
 const DEBUG = process.env.OPENCLAW_DEBUG === "1";
+const MOCK_MODE =
+  process.env.OPENCLAW_MOCK === "1" ||
+  process.env.OPENCLAW_MOCK === "true" ||
+  process.argv.includes("--mock");
 
 function debug(msg: string) {
   if (DEBUG) process.stderr.write(`${msg}\n`);
@@ -116,25 +126,69 @@ function activeClient(): GatewayClient | null {
   return clients.get(activeInstance) ?? null;
 }
 
-const clientShim: GatewayClient = {
-  request: (async (method: string, params?: unknown) => {
-    const { client: c } = await ensureClient();
+/**
+ * Resolve the cached client for a sync getter (getDevice / getLastHello / …).
+ * Honours the env-var override (always wins) and falls back to whichever
+ * instance was last activated by an async call. Returns null when nothing
+ * has been initialised yet — sync getters have no way to trigger a connect,
+ * so callers expect null safely.
+ */
+function clientForLookup(opts?: CallOpts): GatewayClient | null {
+  // Env override always wins, regardless of the requested instance name.
+  if (ENV_URL) return clients.get(ENV_INSTANCE) ?? null;
+  if (opts?.instance) return clients.get(opts.instance) ?? null;
+  return activeClient();
+}
+
+const mockGateway = MOCK_MODE ? new MockGateway() : null;
+
+// In MOCK_MODE we never reach the real GatewayClient — every tool call is
+// answered by the in-memory MockGateway. Sync getters return canned values so
+// `openclaw_device_status`, `openclaw_health` etc. don't crash on null.
+const MOCK_HELLO = {
+  type: "hello",
+  protocol: 3,
+  server: { version: "mock-2026.0.0", connId: "mock-conn" },
+  features: { methods: [] as string[], events: [] as string[] },
+};
+
+const clientShim: ToolClient = {
+  request: (async (method: string, params: unknown, opts?: CallOpts) => {
+    if (mockGateway) return mockGateway.request(method, params);
+    const { client: c } = await ensureClient(opts?.instance);
     return c.request(method, params);
-  }) as GatewayClient["request"],
-  connect: (async () => {
-    const { client: c } = await ensureClient();
+  }) as ToolClient["request"],
+  connect: async (opts) => {
+    if (mockGateway) return MOCK_HELLO;
+    const { client: c } = await ensureClient(opts?.instance);
     return c.connect();
-  }) as GatewayClient["connect"],
-  close: (async () => {
-    const c = activeClient();
+  },
+  close: async (opts) => {
+    if (mockGateway) return;
+    const c = clientForLookup(opts);
     if (c) await c.close();
-  }) as GatewayClient["close"],
-  getDevice: () => activeClient()?.getDevice() ?? null,
-  getLastHello: () => activeClient()?.getLastHello() ?? null,
-  getPairingPending: () => activeClient()?.getPairingPending() ?? null,
-  getGatewayId: () => activeClient()?.getGatewayId() ?? "<unconfigured>",
-  getLastSuccessAtMs: () => activeClient()?.getLastSuccessAtMs() ?? null,
-} as unknown as GatewayClient;
+  },
+  getDevice: (opts) => {
+    if (mockGateway) return { deviceId: "mock-device-id", publicKey: "mock", privateKey: "mock" };
+    return clientForLookup(opts)?.getDevice() ?? null;
+  },
+  getLastHello: (opts) => {
+    if (mockGateway) return MOCK_HELLO;
+    return clientForLookup(opts)?.getLastHello() ?? null;
+  },
+  getPairingPending: (opts) => {
+    if (mockGateway) return null;
+    return clientForLookup(opts)?.getPairingPending() ?? null;
+  },
+  getGatewayId: (opts) => {
+    if (mockGateway) return "mock-gateway";
+    return clientForLookup(opts)?.getGatewayId() ?? "<unconfigured>";
+  },
+  getLastSuccessAtMs: (opts) => {
+    if (mockGateway) return Date.now();
+    return clientForLookup(opts)?.getLastSuccessAtMs() ?? null;
+  },
+};
 
 const setupTools = buildSetupTools(store, {
   reconfigure: async (_cfg, instance) => {
@@ -160,6 +214,7 @@ const tools: ToolDef[] = [
   ...buildModelsTools(clientShim),
   ...buildUsageTools(clientShim),
   ...buildCronTools(clientShim),
+  ...buildCronTemplateTools(clientShim),
   ...buildConfigTools(clientShim),
   ...buildSecretsTools(clientShim),
   ...buildSkillsTools(clientShim),
@@ -209,8 +264,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   };
 });
 
-const transport = new StdioServerTransport();
-
 async function shutdown() {
   for (const c of clients.values()) await c.close().catch(() => {});
   process.exit(0);
@@ -219,7 +272,7 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 // CLI flag: `npx -y openclaw-control-mcp --health` runs a one-shot diagnostic
-// then exits — does NOT start the stdio server. Useful for `is everything OK?`
+// then exits — does NOT start a server. Useful for `is everything OK?`
 // without wiring the MCP into a client.
 if (process.argv.includes("--health") || process.argv.includes("-H")) {
   const report = await runHealthDiagnostic();
@@ -227,8 +280,85 @@ if (process.argv.includes("--health") || process.argv.includes("-H")) {
   process.exit(report.ok ? 0 : 1);
 }
 
-await server.connect(transport);
-debug("openclaw-control-mcp connected via stdio");
+const httpMode =
+  process.argv.includes("--http") ||
+  process.env.OPENCLAW_HTTP === "1" ||
+  process.env.OPENCLAW_HTTP === "true";
+
+if (httpMode) {
+  await startHttpServer();
+} else {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  debug("openclaw-control-mcp connected via stdio");
+}
+
+async function startHttpServer(): Promise<void> {
+  const port = readNumberArg("--http-port", "OPENCLAW_HTTP_PORT") ?? 3333;
+  const host = readStringArg("--http-host", "OPENCLAW_HTTP_HOST") ?? "127.0.0.1";
+
+  // Stateful mode — assigns a session id per client so concurrent MCP clients
+  // (Cursor + Continue + curl smoke-tests) don't share state. Stateless single
+  // transport would force them to clobber each other on session-bound calls.
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+  });
+  await server.connect(transport);
+
+  const httpServer = createHttpServer((req, res) => {
+    if (!req.url) {
+      res.statusCode = 400;
+      res.end("missing url");
+      return;
+    }
+    const url = new URL(req.url, `http://${req.headers.host ?? host}`);
+    if (url.pathname !== "/mcp") {
+      res.statusCode = 404;
+      res.end("not found — POST/GET /mcp for MCP traffic");
+      return;
+    }
+    transport.handleRequest(req, res).catch((err: unknown) => {
+      debug(`http request failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end("internal error");
+      }
+    });
+  });
+
+  await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
+  process.stderr.write(
+    `openclaw-control-mcp listening on http://${host}:${port}/mcp (Streamable HTTP, MCP ${getMcpVersion()})\n`,
+  );
+
+  const closeHttp = async () => {
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    await transport.close();
+  };
+  process.on("SIGINT", () => {
+    closeHttp().finally(() => process.exit(0));
+  });
+  process.on("SIGTERM", () => {
+    closeHttp().finally(() => process.exit(0));
+  });
+}
+
+function readStringArg(flag: string, envName: string): string | undefined {
+  const idx = process.argv.findIndex((a) => a === flag || a.startsWith(`${flag}=`));
+  if (idx >= 0) {
+    const arg = process.argv[idx] ?? "";
+    if (arg.includes("=")) return arg.split("=", 2)[1];
+    return process.argv[idx + 1];
+  }
+  return process.env[envName]?.trim() || undefined;
+}
+
+function readNumberArg(flag: string, envName: string): number | undefined {
+  const raw = readStringArg(flag, envName);
+  if (!raw) return undefined;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
 
 async function runHealthDiagnostic() {
   const cfg = await store.loadConfig();
@@ -259,6 +389,18 @@ async function runHealthDiagnostic() {
     lastSuccessAgo: null,
     error: null,
   };
+  if (mockGateway) {
+    // In mock mode there's no real handshake to probe — return a canned
+    // successful health so the diagnostic exits 0 and tells the user clearly.
+    result.ok = true;
+    result.gatewayUrl = "mock://in-memory";
+    result.paired = true;
+    result.scopes = ["operator.read", "operator.write", "operator.admin"];
+    result.server = MOCK_HELLO.server;
+    result.device = { fingerprint: "mock-device-id  " };
+    result.lastSuccessAgo = "0ms ago (mock)";
+    return result;
+  }
   if (!url) {
     result.error = "OpenClaw gateway not configured. Set OPENCLAW_GATEWAY_URL/TOKEN or run openclaw_setup once.";
     return result;

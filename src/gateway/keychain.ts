@@ -6,15 +6,16 @@ import { platform, userInfo } from "node:os";
  * `~/.config/openclaw-control-mcp/store.json` (which is only mode 0600 — fine
  * against other local users, weak against any process running as you).
  *
- * v1 design (intentional tradeoffs):
  *   - macOS: shells out to the built-in `security` CLI (no extra dep)
  *   - Linux: shells out to `secret-tool` if installed (libsecret)
  *   - Windows / no-keychain-available: returns null on read, throws on write
- *     (the Store catches and falls back to plain JSON, keeping 0.3.x behaviour)
+ *     (the Store catches and falls back to plain JSON)
  *
- * This is opt-in via `OPENCLAW_USE_KEYCHAIN=1`. Default OFF in 0.4.0, will flip
- * to ON in 0.5.0 once the migration path is validated. Existing users on the
- * default get the current `store.json` mode 0600 behaviour, no surprise.
+ * Default ON since 0.5.0 — set `OPENCLAW_USE_KEYCHAIN=0` to opt out and keep
+ * everything in `store.json` mode 0600 (the 0.3.x / 0.4.x default). Migration
+ * is lazy: existing 0.4.x users on plain JSON keep working until the next
+ * Store.save() (typically the next gateway connect that refreshes the device
+ * token), at which point secrets move to the keychain automatically.
  *
  * Keys are namespaced as `openclaw-control-mcp:<scope>` to avoid collisions
  * with other apps. Values are arbitrary strings (we serialise the secret —
@@ -150,12 +151,15 @@ export async function resolveKeychainBackend(): Promise<KeychainBackend> {
 }
 
 /**
- * Convenience helper used by `Store`: returns the keychain backend if the user
- * opted in via env var AND the backend is actually usable. Otherwise returns
- * null and the Store keeps the legacy plain-JSON behaviour.
+ * Convenience helper used by `Store`: returns the keychain backend when one
+ * is usable AND the user hasn't opted out. Default ON since 0.5.0 — set
+ * `OPENCLAW_USE_KEYCHAIN=0` (or "false") to keep secrets in plain JSON.
+ * Returns null when no usable backend exists (no keychain CLI installed) so
+ * the Store falls back to plain `store.json` mode 0600.
  */
 export async function maybeKeychainBackend(): Promise<KeychainBackend | null> {
-  if (process.env.OPENCLAW_USE_KEYCHAIN !== "1") return null;
+  const flag = process.env.OPENCLAW_USE_KEYCHAIN;
+  if (flag === "0" || flag === "false") return null;
   const backend = await resolveKeychainBackend();
   if (backend.id === "noop") return null;
   return backend;

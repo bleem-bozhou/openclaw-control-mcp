@@ -1,24 +1,25 @@
 import { z } from "zod";
-import type { GatewayClient } from "../gateway/client.js";
 import type { Store } from "../gateway/store.js";
+import { splitInstance, withInstance, type ToolClient } from "./client.js";
 import type { ToolDef } from "./cron.js";
 import { WRAPPED_METHODS } from "./wrappedMethods.js";
 
-export function buildIntrospectTools(client: GatewayClient, store: Store): ToolDef[] {
+export function buildIntrospectTools(client: ToolClient, store: Store): ToolDef[] {
   const introspect: ToolDef = {
     name: "openclaw_introspect",
     description:
       "Inspect the OpenClaw gateway capabilities. Triggers a connect (if not already), returns the server version, this device's role/scopes, the full list of JSON-RPC `methods` and `events` the gateway publishes, and a coverage report comparing those methods to the typed wrappers this MCP exposes. Use to discover what methods you can call via `openclaw_call` and to spot endpoints that still need a typed wrapper after a gateway upgrade.",
-    inputSchema: z.object({}),
-    handler: async () => {
+    inputSchema: withInstance(z.object({})),
+    handler: async (args) => {
+      const { opts } = splitInstance(args);
       let connectError: string | null = null;
       try {
-        await client.connect();
+        await client.connect(opts);
       } catch (err) {
         connectError = err instanceof Error ? err.message : String(err);
       }
-      const hello = client.getLastHello();
-      const tokenEntry = await store.loadToken(client.getGatewayId());
+      const hello = client.getLastHello(opts);
+      const tokenEntry = await store.loadToken(client.getGatewayId(opts));
       const features = (hello?.features ?? null) as
         | { methods?: string[]; events?: string[] }
         | null;
@@ -70,19 +71,20 @@ export function buildIntrospectTools(client: GatewayClient, store: Store): ToolD
     name: "openclaw_call",
     description:
       "DESTRUCTIVE ESCAPE HATCH — call ANY JSON-RPC method on the gateway with arbitrary params. Use this to operate on endpoints that don't yet have a typed wrapper. The user must validate the exact method name and params on every call (especially anything matching `*.add|remove|delete|update|create|write|terminate|reset|approve|reject`). For read-only inspection prefer the typed tools (`openclaw_cron_list`, `openclaw_introspect`, …) — `openclaw_call` should only be used when no typed alternative exists.",
-    inputSchema: z.object({
+    inputSchema: withInstance(z.object({
       method: z
         .string()
         .min(1)
         .describe("JSON-RPC method name, e.g. 'cron.list', 'session.list'. Discover the full set via openclaw_introspect."),
       params: z
-        .unknown()
+        .record(z.string(), z.unknown())
         .optional()
-        .describe("Method params. Pass an object matching the gateway's expected shape; consult an existing typed tool for that domain to learn the schema."),
-    }),
+        .describe("Method params. MUST be a JSON object matching the gateway's expected shape (e.g. `{}` for no-arg methods). Strings, arrays, or primitives are rejected — the gateway requires an object even when there are no params."),
+    })),
     handler: async (args) => {
-      const { method, params } = args as { method: string; params?: unknown };
-      return client.request(method, params);
+      const { rest, opts } = splitInstance(args);
+      const { method, params } = rest as { method: string; params?: Record<string, unknown> };
+      return client.request(method, params ?? {}, opts);
     },
   };
 

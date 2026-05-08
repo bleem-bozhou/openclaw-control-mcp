@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { GatewayClient } from "../gateway/client.js";
+import { passthroughHandler, splitInstance, withInstance, type ToolClient } from "./client.js";
 import { formatAgo, truncate } from "../format.js";
 
 export type ToolDef = {
@@ -11,12 +11,12 @@ export type ToolDef = {
 
 const enabledFilter = z.enum(["all", "enabled", "disabled"]).optional();
 
-export function buildCronTools(client: GatewayClient): ToolDef[] {
+export function buildCronTools(client: ToolClient): ToolDef[] {
   const cronList: ToolDef = {
     name: "openclaw_cron_list",
     description:
       "List configured OpenClaw cron jobs. Wraps the gateway JSON-RPC method `cron.list`. Returns jobs with name, schedule, payload kind, and enabled state.",
-    inputSchema: z.object({
+    inputSchema: withInstance(z.object({
       query: z.string().optional().describe("Free-text search filter on job name"),
       enabled: enabledFilter.describe("Filter by enabled/disabled state"),
       includeDisabled: z.boolean().optional().describe("Set true to include disabled jobs (alias for enabled='all')"),
@@ -24,50 +24,47 @@ export function buildCronTools(client: GatewayClient): ToolDef[] {
       offset: z.number().int().min(0).optional(),
       sortBy: z.string().optional(),
       sortDir: z.enum(["asc", "desc"]).optional(),
-    }),
-    handler: async (args) => {
-      const params = (args ?? {}) as Record<string, unknown>;
-      return client.request("cron.list", params);
-    },
+    })),
+    handler: passthroughHandler(client, "cron.list"),
   };
 
   const cronStatus: ToolDef = {
     name: "openclaw_cron_status",
     description:
       "Get the OpenClaw cron scheduler status (enabled flag, next-run timestamp, recent failures). Wraps `cron.status`.",
-    inputSchema: z.object({}),
-    handler: async () => client.request("cron.status", {}),
+    inputSchema: withInstance(z.object({})),
+    handler: passthroughHandler(client, "cron.status"),
   };
 
   const cronRun: ToolDef = {
     name: "openclaw_cron_run",
     description: "Trigger an immediate run of a specific OpenClaw cron job by id. Wraps `cron.run`.",
-    inputSchema: z.object({
+    inputSchema: withInstance(z.object({
       id: z.string().min(1).describe("Cron job id"),
-    }),
-    handler: async (args) => client.request("cron.run", args ?? {}),
+    })),
+    handler: passthroughHandler(client, "cron.run"),
   };
 
   const cronRuns: ToolDef = {
     name: "openclaw_cron_runs",
     description:
       "List recent runs of a specific OpenClaw cron job. Wraps `cron.runs`. Pass `compact: true` to truncate each run's `summary` to 200 chars (saves tokens when scanning many runs); a `summaryTruncated` flag is added per entry. Each entry also gets a `runAtAgo` field (e.g. \"3h ago\") for readability.",
-    inputSchema: z.object({
+    inputSchema: withInstance(z.object({
       id: z.string().min(1).describe("Cron job id"),
       limit: z.number().int().positive().max(500).optional(),
       offset: z.number().int().min(0).optional(),
       compact: z.boolean().optional().describe("Truncate each run's summary to 200 chars"),
       summaryMaxChars: z.number().int().positive().max(5000).optional().describe("Override the truncation length when compact=true (default 200)"),
-    }),
+    })),
     handler: async (args) => {
-      const opts = (args ?? {}) as {
+      const { rest, opts } = splitInstance(args);
+      const { compact, summaryMaxChars, ...rpcArgs } = rest as {
         compact?: boolean;
         summaryMaxChars?: number;
         [k: string]: unknown;
       };
-      const { compact, summaryMaxChars, ...rpcArgs } = opts;
       const max = summaryMaxChars ?? 200;
-      const result = (await client.request("cron.runs", rpcArgs)) as {
+      const result = (await client.request("cron.runs", rpcArgs, opts)) as {
         entries?: Array<Record<string, unknown>>;
         [k: string]: unknown;
       };
@@ -92,17 +89,17 @@ export function buildCronTools(client: GatewayClient): ToolDef[] {
   const cronRemove: ToolDef = {
     name: "openclaw_cron_remove",
     description: "Delete an OpenClaw cron job by id. Destructive — confirm before calling. Wraps `cron.remove`.",
-    inputSchema: z.object({
+    inputSchema: withInstance(z.object({
       id: z.string().min(1).describe("Cron job id"),
-    }),
-    handler: async (args) => client.request("cron.remove", args ?? {}),
+    })),
+    handler: passthroughHandler(client, "cron.remove"),
   };
 
   const cronAdd: ToolDef = {
     name: "openclaw_cron_add",
     description:
       "Create a new OpenClaw cron job. Wraps `cron.add`. Field names match the gateway wire format (verified by the Control panel SPA + live calls), NOT the README placeholders sometimes seen in the MCP source: schedule uses `expr`/`tz` (cron) or `everyMs` (every) or `at` (exact); payload.agentTurn uses `message` and `timeoutSeconds`. Examples: `{ schedule: { kind: \"cron\", expr: \"0 13 * * 5\", tz: \"Europe/Paris\" }, payload: { kind: \"agentTurn\", message: \"...\", timeoutSeconds: 180 } }`.",
-    inputSchema: z.object({
+    inputSchema: withInstance(z.object({
       job: z
         .object({
           name: z.string().min(1).describe("Job name shown in the Control panel"),
@@ -145,18 +142,19 @@ export function buildCronTools(client: GatewayClient): ToolDef[] {
           deleteAfterRun: z.boolean().optional().describe("Self-delete after one fire — useful for one-shot reminders."),
         })
         .passthrough(),
-    }),
-    handler: async (args) => client.request("cron.add", args ?? {}),
+    })),
+    handler: passthroughHandler(client, "cron.add"),
   };
 
   const cronUpdate: ToolDef = {
     name: "openclaw_cron_update",
     description:
-      "Update an existing OpenClaw cron job in place. Wraps `cron.update`. Avoids the remove + re-add dance when you just want to change schedule, timeout, payload, or delivery. Pass the job id and the fields to change.",
-    inputSchema: z.object({
-      job: z
+      "Update an existing OpenClaw cron job in place. Wraps `cron.update`. Avoids the remove + re-add dance when you just want to change schedule, timeout, payload, or delivery. Wire format (verified live against gateway 2026.4.12+): `{ id|jobId: string, patch: object }` — pass the job id and a `patch` object containing only the fields you want to change. Older shape `{ job: { id, ...fields } }` is auto-translated for backward compat with pre-0.5.1 callers.",
+    inputSchema: withInstance(z.object({
+      id: z.string().min(1).optional().describe("Cron job id (preferred). Pass either `id` or `jobId`."),
+      jobId: z.string().min(1).optional().describe("Cron job id (alias). Pass either `id` or `jobId`."),
+      patch: z
         .object({
-          id: z.string().min(1).describe("Cron job id"),
           name: z.string().optional(),
           enabled: z.boolean().optional(),
           schedule: z
@@ -189,9 +187,39 @@ export function buildCronTools(client: GatewayClient): ToolDef[] {
             .optional(),
           deleteAfterRun: z.boolean().optional(),
         })
-        .passthrough(),
-    }),
-    handler: async (args) => client.request("cron.update", args ?? {}),
+        .passthrough()
+        .optional()
+        .describe("Fields to change (any subset of writable cron fields)."),
+      // Backward-compat: pre-0.5.1 callers passed `{ job: { id, ...fields } }`.
+      // We accept it and translate to the live wire format below.
+      job: z
+        .object({
+          id: z.string().min(1),
+        })
+        .passthrough()
+        .optional()
+        .describe("DEPRECATED — pre-0.5.1 shape. Pass `id` + `patch` instead."),
+    })),
+    handler: async (args) => {
+      const { rest, opts } = splitInstance(args);
+      const a = rest as {
+        id?: string;
+        jobId?: string;
+        patch?: Record<string, unknown>;
+        job?: { id: string; [k: string]: unknown };
+      };
+      let id = a.id ?? a.jobId;
+      let patch: Record<string, unknown> = a.patch ?? {};
+      if (a.job) {
+        const { id: legacyId, ...legacyPatch } = a.job;
+        id = id ?? legacyId;
+        patch = { ...legacyPatch, ...patch };
+      }
+      if (!id) {
+        throw new Error("cron.update requires `id` (or legacy `job.id` / `jobId`).");
+      }
+      return client.request("cron.update", { id, patch }, opts);
+    },
   };
 
   return [cronList, cronStatus, cronRun, cronRuns, cronRemove, cronAdd, cronUpdate];

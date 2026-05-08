@@ -6,3 +6,5 @@ dist
 .env.*
 .issue-comment-draft.md
 *.tgz
+.codegraph/
+STATE.md
