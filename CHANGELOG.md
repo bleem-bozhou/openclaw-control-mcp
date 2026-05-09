@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`DevicePrivateKeyMissingError`** class exported from `gateway/device.ts`.
 - **`isStaleNonceError`** helper exported from `gateway/client.ts`.
 
+### Removed
+
+- **`smithery.yaml`** at the repo root. Smithery's current publish flow expects an HTTP-accessible MCP server (each user shares the same endpoint), which doesn't fit a per-user client like this one (each user has their OWN gateway URL + token). The package stays distributed via npm (`npx -y openclaw-control-mcp`) and the official MCP Registry (`io.github.smurfy92/openclaw-control-mcp`). Re-add the manifest if Smithery reintroduces a stdio-launch flow with per-user config.
+
 ### Internals
 
 - Bundle 125.67 → 141.66 KB (+16 KB for the 4 cron templates + MockGateway + client-side filter logic).

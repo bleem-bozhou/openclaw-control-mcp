@@ -1,3 +1,4 @@
+// ADR-002 — `ToolClient` interface as the integration boundary. See docs/adr/002-toolclient-interface-as-the-integration-boundary.md.
 import { z } from "zod";
 import type { DeviceIdentity } from "../gateway/device.js";
 import type { PairingPending } from "../gateway/client.js";

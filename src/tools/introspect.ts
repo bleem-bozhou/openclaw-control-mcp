@@ -1,3 +1,4 @@
+// ADR-004 — `openclaw_introspect` + `openclaw_call` as the escape hatch. See docs/adr/004-introspect-and-call-as-the-escape-hatch.md.
 import { z } from "zod";
 import type { Store } from "../gateway/store.js";
 import { splitInstance, withInstance, type ToolClient } from "./client.js";

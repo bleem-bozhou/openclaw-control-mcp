@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// ADR-003 — Single-process shim with per-instance client cache. See docs/adr/003-single-process-shim-with-per-instance-client-cache.md.
 import { createServer as createHttpServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";

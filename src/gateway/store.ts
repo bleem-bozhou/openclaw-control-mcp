@@ -1,3 +1,4 @@
+// ADR-001 — Multi-instance Store with keychain-backed secrets. See docs/adr/001-multi-instance-store-with-keychain-backed-secrets.md.
 import { mkdir, readFile, writeFile, chmod } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
