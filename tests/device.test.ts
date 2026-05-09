@@ -1,6 +1,12 @@
 import * as ed from "@noble/ed25519";
 import { describe, expect, it } from "vitest";
-import { buildSigningString, generateDevice, signConnect, verifyDeviceId } from "../src/gateway/device.js";
+import {
+  buildSigningString,
+  DevicePrivateKeyMissingError,
+  generateDevice,
+  signConnect,
+  verifyDeviceId,
+} from "../src/gateway/device.js";
 
 const SAMPLE_INPUT = {
   deviceId: "deadbeef".repeat(8),
@@ -80,5 +86,17 @@ describe("signConnect", () => {
     );
     const ok = await ed.verifyAsync(fromBase64Url(sig), tampered, fromBase64Url(device.publicKey));
     expect(ok).toBe(false);
+  });
+
+  it("throws DevicePrivateKeyMissingError on empty privateKey (the bug from docs/troubleshooting/empty-private-key.md)", async () => {
+    await expect(signConnect(SAMPLE_INPUT, "")).rejects.toThrow(DevicePrivateKeyMissingError);
+    await expect(signConnect(SAMPLE_INPUT, "")).rejects.toThrow(/0 bytes, expected 32/);
+    await expect(signConnect(SAMPLE_INPUT, "")).rejects.toThrow(/openclaw_device_repair/);
+  });
+
+  it("throws on a privateKey of wrong length", async () => {
+    // 16 bytes (half-length) — base64url of 16 zero bytes
+    const halfKey = Buffer.alloc(16).toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+    await expect(signConnect(SAMPLE_INPUT, halfKey)).rejects.toThrow(/16 bytes, expected 32/);
   });
 });

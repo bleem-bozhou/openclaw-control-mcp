@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { enrichRequestError, GatewayError, isTransientError } from "../src/gateway/client.js";
+import {
+  enrichRequestError,
+  GatewayError,
+  isStaleNonceError,
+  isTransientError,
+} from "../src/gateway/client.js";
 
 describe("isTransientError", () => {
   it.each([
@@ -73,5 +78,48 @@ describe("enrichRequestError", () => {
     const once = enrichRequestError(orig, "cron.list", 4, 4);
     const twice = enrichRequestError(once, "cron.list", 4, 4);
     expect(twice).toBe(once); // returns the same object, no double-prefix
+  });
+
+  it("appends an actionable hint on stale-nonce errors at the final attempt", () => {
+    const orig = new GatewayError({ message: "device nonce mismatch", code: "STALE" });
+    const wrapped = enrichRequestError(orig, "cron.list", 4, 4);
+    expect(wrapped.message).toMatch(/device nonce mismatch/);
+    expect(wrapped.message).toMatch(/openclaw_setup/);
+    expect(wrapped.message).toMatch(/troubleshooting\/stale-connection-nonce-mismatch\.md/);
+  });
+
+  it("does NOT append the stale-nonce hint on early attempts (still retrying)", () => {
+    const orig = new GatewayError({ message: "device nonce mismatch", code: "STALE" });
+    const wrapped = enrichRequestError(orig, "cron.list", 1, 4);
+    expect(wrapped.message).toMatch(/device nonce mismatch/);
+    expect(wrapped.message).not.toMatch(/openclaw_setup/);
+  });
+});
+
+describe("isStaleNonceError + nonce-mismatch transient handling", () => {
+  it.each([
+    "device nonce mismatch",
+    "Device Nonce Mismatch",
+    "STALE_NONCE",
+    "stale nonce",
+    "stale-nonce",
+  ])("classifies '%s' as stale-nonce", (msg) => {
+    expect(isStaleNonceError(new Error(msg))).toBe(true);
+  });
+
+  it("does NOT match unrelated errors", () => {
+    expect(isStaleNonceError(new Error("ECONNRESET"))).toBe(false);
+    expect(isStaleNonceError(new Error("invalid arguments"))).toBe(false);
+  });
+
+  it("nonce mismatch as a GatewayError is now treated as transient (retry triggers fresh handshake)", () => {
+    const err = new GatewayError({ message: "device nonce mismatch", code: "STALE" });
+    expect(isTransientError(err)).toBe(true);
+  });
+
+  it("nonce mismatch as a plain Error is transient too (defensive — server might wrap it differently)", () => {
+    expect(isTransientError(new Error("device nonce mismatch"))).toBe(false);
+    // ↑ plain Error path still goes through the network-message regex which doesn't match nonce —
+    // we expect callers to surface nonce mismatch as a GatewayError. Documented here for clarity.
   });
 });

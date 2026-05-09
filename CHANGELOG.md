@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`openclaw_sessions_list` `status` filter is now applied client-side.** The gateway rejects `status` with `INVALID_REQUEST: unexpected property 'status'` (verified live against 2026.4.12+). The wrapper now forwards only `agentId` / `limit` / `offset` to the gateway and filters the returned `sessions[]` array by `status` after fetch. Surfaces a `statusFilter` field in the response for transparency. No change for callers that don't pass `status`.
 - **`openclaw_logs_tail` `sinceMs` / `level` / `component` filters now applied client-side.** The gateway rejects all three with `INVALID_REQUEST: unexpected property 'X'` (verified live against 2026.4.12+). Only `limit` reaches the wire. The handler parses each line's `_meta.date` / `_meta.logLevelName` / message text and filters in-process. Surfaces a `clientFilter` field with `{ sinceMs, level, component, kept, dropped }` so callers can see what was filtered. Use a higher `limit` when filtering aggressively to avoid empty responses.
+- **Stale WS — `device nonce mismatch` now auto-recovers.** `isTransientError` matches `/nonce mismatch|stale[_\s-]?nonce/i` on `GatewayError`, so the existing retry loop (which already drops cached client + nonce between attempts) triggers a fresh handshake on the next attempt. When the retry budget is exhausted (4 attempts), the wrapped error message includes an actionable hint pointing at `openclaw_setup` and the troubleshooting doc. Resolves bug from `docs/troubleshooting/stale-connection-nonce-mismatch.md`.
+- **Empty `device.privateKey` — three-layer fix.** (1) `Store.stripSecretsToKeychain` no longer blanks `privateKey` when the keychain `set` call throws — the secret stays in the on-disk JSON (mode 0600) instead of being lost. Same for tokens, gatewayToken, gatewayPassword. (2) `signConnect` now pre-checks key length and throws a typed `DevicePrivateKeyMissingError` with actionable steps instead of the cryptic `expected Uint8Array of length 32, got length=0` from noble. (3) New tool **`openclaw_device_repair`** backs up `store.json` to `store.json.bak.<ts>`, wipes the broken device + cached tokens, drops matching keychain entries, and surfaces a clear next-step. Configs (gatewayUrl, gatewayToken) are preserved. Resolves bug from `docs/troubleshooting/empty-private-key.md`.
+
+### Added (since 0.5.0)
+
+- **`openclaw_device_repair`** tool — single-purpose recovery from the empty-private-key inconsistency.
+- **`Store.deviceIntegrity()`** + **`Store.repairDevice()`** — public Store API for callers that need to inspect or reset device state programmatically.
+- **`DevicePrivateKeyMissingError`** class exported from `gateway/device.ts`.
+- **`isStaleNonceError`** helper exported from `gateway/client.ts`.
 
 ### Internals
 

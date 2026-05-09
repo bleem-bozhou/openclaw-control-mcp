@@ -142,34 +142,37 @@ export class Store {
 
   /**
    * Pull secrets out of `state` and into the keychain backend. Returns a deep
-   * clone of the state with secret fields blanked so the JSON file no longer
-   * contains them. Best-effort: a keychain write failure is logged via thrown
-   * error, callers don't have to special-case it (the Store.save catches and
-   * logs as needed downstream).
+   * clone of the state with secret fields blanked **only when the keychain
+   * write succeeded** — otherwise the secret is preserved in the on-disk JSON
+   * (mode 0600), matching pre-keychain 0.3.x behaviour. Avoids the failure
+   * mode where a backend silently no-ops the write and the only copy of the
+   * secret gets discarded (see docs/troubleshooting/empty-private-key.md).
    */
   private async stripSecretsToKeychain(state: StoreShape, kc: KeychainBackend): Promise<StoreShape> {
     const cleaned: StoreShape = JSON.parse(JSON.stringify(state));
     if (cleaned.device?.privateKey) {
-      await kc.set("device-private-key", cleaned.device.privateKey);
-      cleaned.device = { ...cleaned.device, privateKey: "" };
+      const ok = await safeSet(kc, "device-private-key", cleaned.device.privateKey);
+      if (ok) cleaned.device = { ...cleaned.device, privateKey: "" };
     }
     if (cleaned.tokens) {
       for (const [gatewayId, entry] of Object.entries(cleaned.tokens)) {
         if (entry?.token) {
-          await kc.set(`device-token:${gatewayId}`, entry.token);
-          cleaned.tokens[gatewayId] = { ...entry, token: "" };
+          const ok = await safeSet(kc, `device-token:${gatewayId}`, entry.token);
+          if (ok) cleaned.tokens[gatewayId] = { ...entry, token: "" };
         }
       }
     }
     if (cleaned.configs) {
       for (const [instance, cfg] of Object.entries(cleaned.configs)) {
         if (cfg.gatewayToken) {
-          await kc.set(`gateway-token:${instance}`, cfg.gatewayToken);
-          cleaned.configs[instance] = { ...cfg, gatewayToken: "" };
+          const ok = await safeSet(kc, `gateway-token:${instance}`, cfg.gatewayToken);
+          if (ok) cleaned.configs[instance] = { ...cfg, gatewayToken: "" };
         }
         if (cfg.gatewayPassword) {
-          await kc.set(`gateway-password:${instance}`, cfg.gatewayPassword);
-          cleaned.configs[instance] = { ...cleaned.configs[instance], gatewayPassword: "" };
+          const ok = await safeSet(kc, `gateway-password:${instance}`, cfg.gatewayPassword);
+          if (ok) {
+            cleaned.configs[instance] = { ...cleaned.configs[instance], gatewayPassword: "" };
+          }
         }
       }
     }
@@ -362,5 +365,84 @@ export class Store {
 
   pathInfo(): string {
     return this.path;
+  }
+
+  /**
+   * Check whether the persisted device identity is usable. Returns:
+   *   - "ok"                 — device exists and privateKey is non-empty
+   *   - "no-device"          — no device at all (fresh install)
+   *   - "missing-private-key" — device.publicKey set but privateKey lost
+   *                             (the bug from docs/troubleshooting/empty-private-key.md)
+   */
+  async deviceIntegrity(): Promise<"ok" | "no-device" | "missing-private-key"> {
+    const s = await this.load();
+    if (!s.device) return "no-device";
+    if (!s.device.privateKey || s.device.privateKey.length === 0) return "missing-private-key";
+    return "ok";
+  }
+
+  /**
+   * Wipe the broken device + cached gateway tokens. Backs up the current
+   * `store.json` to `store.json.bak.<ts>` so the user can recover if needed.
+   * Also drops the matching keychain entries (`device-private-key`, all
+   * `device-token:*`). Configs (gatewayUrl, gatewayToken, gatewayPassword)
+   * are preserved — the user re-uses them on the next setup.
+   *
+   * After this, the next `connect()` regenerates a fresh keypair and
+   * surfaces a new pendingPairing.requestId. The orphaned approved device on
+   * the gateway side becomes harmless (its token is never used) but the user
+   * should revoke it from the Control panel for cleanliness.
+   */
+  async repairDevice(): Promise<{ backupPath: string | null; wiped: { device: boolean; tokenCount: number } }> {
+    const beforeState = await this.load();
+    const hadDevice = !!beforeState.device;
+    const tokenIds = Object.keys(beforeState.tokens ?? {});
+
+    // Backup the on-disk JSON (best-effort — no backup if file doesn't exist).
+    let backupPath: string | null = `${this.path}.bak.${Date.now()}`;
+    try {
+      const raw = await readFile(this.path, "utf8");
+      await writeFile(backupPath, raw, "utf8");
+      try {
+        await chmod(backupPath, 0o600);
+      } catch {
+        /* best-effort on non-POSIX */
+      }
+    } catch {
+      backupPath = null;
+    }
+
+    // Drop device + tokens from in-memory state and write back.
+    delete beforeState.device;
+    beforeState.tokens = {};
+    await this.save(beforeState);
+
+    // Wipe the matching keychain entries (device key + per-gateway tokens
+    // that were present before the wipe).
+    const kc = await this.getKeychain();
+    if (kc) {
+      await kc.delete("device-private-key");
+      for (const gatewayId of tokenIds) {
+        await kc.delete(`device-token:${gatewayId}`);
+      }
+    }
+
+    return { backupPath, wiped: { device: hadDevice, tokenCount: tokenIds.length } };
+  }
+}
+
+/**
+ * Attempt a keychain write and report whether it succeeded. Backends like
+ * NoopBackend throw — we treat that as failure (caller keeps the secret in
+ * the on-disk JSON instead of discarding it). Real backends (macOS, libsecret)
+ * also throw on CLI errors; same behaviour. The helper is at module scope so
+ * tests can mock it independently of the Store instance.
+ */
+async function safeSet(kc: KeychainBackend, key: string, value: string): Promise<boolean> {
+  try {
+    await kc.set(key, value);
+    return true;
+  } catch {
+    return false;
   }
 }

@@ -59,9 +59,24 @@ export function buildSigningString(input: SignConnectInput): string {
   ].join("|");
 }
 
+export class DevicePrivateKeyMissingError extends Error {
+  constructor(actualLen: number) {
+    super(
+      `device private key is empty or malformed (got ${actualLen} bytes, expected 32). ` +
+        `Run openclaw_device_repair to wipe the broken device + tokens and re-pair, ` +
+        `or manually wipe the device entry in ~/.config/openclaw-control-mcp/store.json. ` +
+        `See docs/troubleshooting/empty-private-key.md.`,
+    );
+    this.name = "DevicePrivateKeyMissingError";
+  }
+}
+
 export async function signConnect(input: SignConnectInput, privateKey: string): Promise<string> {
   const message = new TextEncoder().encode(buildSigningString(input));
   const sk = fromBase64Url(privateKey);
+  if (sk.length !== 32) {
+    throw new DevicePrivateKeyMissingError(sk.length);
+  }
   const sig = await ed.signAsync(message, sk);
   return toBase64Url(sig);
 }

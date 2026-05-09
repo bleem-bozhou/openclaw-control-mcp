@@ -108,6 +108,25 @@ export function buildDeviceTools(client: ToolClient, store: Store): ToolDef[] {
     handler: passthroughHandler(client, "device.token.rotate"),
   };
 
+  const deviceRepair: ToolDef = {
+    name: "openclaw_device_repair",
+    description:
+      "Recover from the `expected Uint8Array of length 32, got length=0` failure mode (empty `device.privateKey`). Backs up `store.json` to `store.json.bak.<ts>`, wipes the broken device + cached tokens (keeps gateway URL + token configs), and drops the matching keychain entries. The next call to any scoped tool regenerates a fresh Ed25519 keypair and surfaces a new `pendingPairing.requestId` to approve in the Control panel. **Destructive — run only when openclaw_device_status reports the empty-private-key failure mode.**",
+    inputSchema: z.object({}),
+    handler: async () => {
+      const integrity = await store.deviceIntegrity();
+      const result = await store.repairDevice();
+      return {
+        ok: true,
+        integrityBefore: integrity,
+        backupPath: result.backupPath,
+        wiped: result.wiped,
+        nextStep:
+          "Call openclaw_device_status to trigger a fresh keypair generation; a new pendingPairing.requestId will be surfaced. Approve it in the Control panel → Devices tab. Then call openclaw_setup again with the same gatewayUrl/token to force a clean reconnect.",
+      };
+    },
+  };
+
   return [
     deviceStatus,
     devicePairList,
@@ -116,5 +135,6 @@ export function buildDeviceTools(client: ToolClient, store: Store): ToolDef[] {
     devicePairRemove,
     deviceTokenRevoke,
     deviceTokenRotate,
+    deviceRepair,
   ];
 }

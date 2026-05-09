@@ -156,6 +156,110 @@ describe("Store + InMemoryKeychain — secret splitting", () => {
     expect(kc.entries.has("gateway-password:default")).toBe(false);
   });
 
+  it("does NOT blank privateKey when keychain.set throws (lossy NoopBackend scenario)", async () => {
+    // Build a keychain that ACCEPTS get but throws on set — the failure mode
+    // that caused the empty-private-key bug pre-fix.
+    const lossy: KeychainBackend = {
+      id: "lossy-test",
+      isAvailable: async () => true,
+      get: async () => null,
+      set: async () => {
+        throw new Error("nope (simulated keychain failure)");
+      },
+      delete: async () => {},
+    };
+    const lossyDir = mkdtempSync(join(tmpdir(), "openclaw-store-lossy-"));
+    const lossyStore = new Store(lossyDir, "store.json", { keychain: lossy });
+    try {
+      await lossyStore.saveDevice({
+        deviceId: "abc",
+        publicKey: "PK",
+        privateKey: "SK-MUST-SURVIVE",
+        createdAtMs: 1,
+      });
+      const json = JSON.parse(readFileSync(join(lossyDir, "store.json"), "utf8")) as {
+        device: { privateKey: string };
+      };
+      expect(json.device.privateKey).toBe("SK-MUST-SURVIVE"); // not blanked
+    } finally {
+      rmSync(lossyDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Store.deviceIntegrity + repairDevice", () => {
+  let dir: string;
+  let kc: InMemoryKeychain;
+  let store: Store;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "openclaw-repair-"));
+    kc = new InMemoryKeychain();
+    store = new Store(dir, "store.json", { keychain: kc });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports `no-device` on a fresh store", async () => {
+    expect(await store.deviceIntegrity()).toBe("no-device");
+  });
+
+  it("reports `ok` after a successful save", async () => {
+    await store.saveDevice({ deviceId: "x", publicKey: "PK", privateKey: "SK", createdAtMs: 1 });
+    expect(await store.deviceIntegrity()).toBe("ok");
+  });
+
+  it("reports `missing-private-key` when privateKey is empty post-load", async () => {
+    // Simulate the broken state directly on disk (keychain has no entry).
+    const broken = {
+      version: 2,
+      device: { deviceId: "x", publicKey: "PK", privateKey: "", createdAtMs: 1 },
+    };
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(join(dir, "store.json"), JSON.stringify(broken), "utf8");
+    expect(await store.deviceIntegrity()).toBe("missing-private-key");
+  });
+
+  it("repairDevice wipes device + tokens, backs up store.json, drops keychain entries", async () => {
+    await store.saveDevice({ deviceId: "x", publicKey: "PK", privateKey: "SK", createdAtMs: 1 });
+    await store.saveToken("gw-1", { token: "T1", role: "operator", scopes: [], savedAtMs: 1 });
+    await store.saveToken("gw-2", { token: "T2", role: "operator", scopes: [], savedAtMs: 2 });
+    expect(kc.entries.has("device-private-key")).toBe(true);
+    expect(kc.entries.has("device-token:gw-1")).toBe(true);
+
+    const result = await store.repairDevice();
+    expect(result.wiped.device).toBe(true);
+    expect(result.wiped.tokenCount).toBe(2);
+    expect(result.backupPath).toBeTruthy();
+
+    // Backup actually exists.
+    expect(readFileSync(result.backupPath as string, "utf8")).toContain("PK");
+
+    // Device + tokens removed from disk + keychain.
+    expect(await store.loadDevice()).toBeUndefined();
+    expect(kc.entries.has("device-private-key")).toBe(false);
+    expect(kc.entries.has("device-token:gw-1")).toBe(false);
+    expect(kc.entries.has("device-token:gw-2")).toBe(false);
+  });
+
+  it("repairDevice preserves gateway configs (URL + token stay)", async () => {
+    await store.saveConfig({ gatewayUrl: "wss://x", gatewayToken: "GT" });
+    await store.saveDevice({ deviceId: "x", publicKey: "PK", privateKey: "SK", createdAtMs: 1 });
+    await store.repairDevice();
+    const cfg = await store.loadConfig();
+    expect(cfg.gatewayUrl).toBe("wss://x");
+    expect(cfg.gatewayToken).toBe("GT");
+  });
+
+  it("repairDevice on a fresh store returns no backup", async () => {
+    const result = await store.repairDevice();
+    expect(result.backupPath).toBeNull();
+    expect(result.wiped.device).toBe(false);
+    expect(result.wiped.tokenCount).toBe(0);
+  });
+
   it("secretsLocation reflects the active backend", async () => {
     expect(await store.secretsLocation()).toBe("in-memory-test + store.json");
   });

@@ -453,6 +453,10 @@ function readEnvInt(name: string, fallback: number, min: number, max: number): n
  * the user sees `gateway request 'cron.list' failed (attempt 4/4): <reason>`
  * instead of just `gateway not connected`. Preserves GatewayError fields and
  * exposes the original error via `cause` for tools that want to inspect it.
+ *
+ * When the underlying error is a stale-nonce (gateway session expired),
+ * appends an actionable hint pointing at `openclaw_setup` so the user knows
+ * how to recover after the in-band retry loop has exhausted its budget.
  */
 export function enrichRequestError(
   err: Error,
@@ -462,10 +466,13 @@ export function enrichRequestError(
 ): Error {
   const prefix = `gateway request '${method}' failed (attempt ${attempt}/${maxAttempts}): `;
   if (err.message.startsWith(prefix)) return err; // already wrapped (defensive)
+  const hint = isStaleNonceError(err) && attempt === maxAttempts
+    ? " — gateway session is stale and re-handshake exhausted. Re-run openclaw_setup with the same params to force a fresh handshake. See docs/troubleshooting/stale-connection-nonce-mismatch.md."
+    : "";
   if (err instanceof GatewayError) {
     const wrapped = new GatewayError({
       code: err.code,
-      message: prefix + err.message,
+      message: prefix + err.message + hint,
       details: err.details,
       retryable: err.retryable,
       retryAfterMs: err.retryAfterMs,
@@ -473,7 +480,7 @@ export function enrichRequestError(
     (wrapped as Error & { cause?: unknown }).cause = err;
     return wrapped;
   }
-  const wrapped = new Error(prefix + err.message);
+  const wrapped = new Error(prefix + err.message + hint);
   (wrapped as Error & { cause?: unknown }).cause = err;
   return wrapped;
 }
@@ -481,6 +488,11 @@ export function enrichRequestError(
 export function isTransientError(err: Error): boolean {
   if (err instanceof GatewayError) {
     if (err.retryable) return true;
+    // `device nonce mismatch` means the server-side session went stale (idle
+    // socket, server timeout, sleep/wake). The retry loop in `request()`
+    // already drops the cached client+nonce between attempts, so a single
+    // retry triggers a fresh handshake.
+    if (isStaleNonceError(err)) return true;
     // Server-side hints we should not retry: scope/auth/validation errors are user-fixable.
     const code = err.code ?? "";
     if (/INVALID|FORBIDDEN|MISSING|NOT_FOUND|PAIRING|UNAUTHENTICATED|CONFLICT/i.test(code)) return false;
@@ -490,4 +502,8 @@ export function isTransientError(err: Error): boolean {
   return /not connected|timed out|ws open timeout|gateway closed|ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(
     err.message,
   );
+}
+
+export function isStaleNonceError(err: Error): boolean {
+  return /nonce mismatch|stale[_\s-]?nonce/i.test(err.message);
 }
