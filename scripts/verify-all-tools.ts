@@ -37,8 +37,11 @@ import { buildSecretsTools } from "../src/tools/secrets.js";
 import { buildSessionsTools } from "../src/tools/sessions.js";
 import { buildSkillsTools } from "../src/tools/skills.js";
 import { buildStatusTools } from "../src/tools/status.js";
+import { buildTalkTools } from "../src/tools/talk.js";
 import { buildToolsCatalogTools } from "../src/tools/toolsCatalog.js";
+import { buildTtsTools } from "../src/tools/tts.js";
 import { buildUsageTools } from "../src/tools/usage.js";
+import { buildVoicewakeTools } from "../src/tools/voicewake.js";
 import { buildWizardTools } from "../src/tools/wizard.js";
 
 type Outcome = {
@@ -92,8 +95,12 @@ const SAFE_PROBES: Array<{ name: string; args: Record<string, unknown> }> = [
   // skills
   { name: "openclaw_skills_status", args: {} },
   { name: "openclaw_skills_bins", args: {} },
+  { name: "openclaw_skills_search", args: { limit: 5 } },
   // tools catalog
   { name: "openclaw_tools_catalog", args: {} },
+  { name: "openclaw_tools_catalog", args: { agentId: "main" } },
+  // chat history (read-only) — keyed by sessionKey
+  { name: "openclaw_chat_history", args: { sessionKey: "agent:main:main", limit: 5 } },
   // exec approvals
   { name: "openclaw_exec_approval_list", args: {} },
   { name: "openclaw_exec_approvals_get", args: {} },
@@ -103,6 +110,7 @@ const SAFE_PROBES: Array<{ name: string; args: Record<string, unknown> }> = [
   { name: "openclaw_wizard_status", args: { sessionId: "agent:main:main" } },
   // doctor memory (read)
   { name: "openclaw_doctor_memory_status", args: {} },
+  { name: "openclaw_doctor_memory_dreamDiary", args: { limit: 5 } },
   // node
   { name: "openclaw_node_list", args: {} },
   { name: "openclaw_node_pair_list", args: {} },
@@ -113,6 +121,18 @@ const SAFE_PROBES: Array<{ name: string; args: Record<string, unknown> }> = [
   { name: "openclaw_introspect", args: {} },
   // commands list
   { name: "openclaw_commands_list", args: {} },
+  // tts / talk / voicewake reads
+  { name: "openclaw_tts_status", args: {} },
+  { name: "openclaw_tts_providers", args: {} },
+  { name: "openclaw_talk_config", args: {} },
+  { name: "openclaw_voicewake_get", args: {} },
+  // config schema deep-dive
+  { name: "openclaw_config_schema_lookup", args: { path: "channels" } },
+  { name: "openclaw_config_get", args: { path: "agents.defaults" } },
+  // cost (read-only billing)
+  { name: "openclaw_usage_cost", args: {} },
+  // sessions read (preview a known session — read-only)
+  { name: "openclaw_sessions_preview", args: { keys: ["agent:main:main"] } },
 ];
 
 function buildAllTools(client: ToolClient, store: Store): Map<string, ToolDef> {
@@ -138,6 +158,9 @@ function buildAllTools(client: ToolClient, store: Store): Map<string, ToolDef> {
     ...buildWizardTools(client),
     ...buildDoctorTools(client),
     ...buildNodeTools(client),
+    ...buildTtsTools(client),
+    ...buildTalkTools(client),
+    ...buildVoicewakeTools(client),
   ];
   return new Map(all.map((t) => [t.name, t]));
 }

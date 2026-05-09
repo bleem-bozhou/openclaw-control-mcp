@@ -14,10 +14,10 @@ export function buildTalkTools(client: ToolClient): ToolDef[] {
   const mode: ToolDef = {
     name: "openclaw_talk_mode",
     description:
-      "Get / set the active talk mode (e.g. continuous, manual). Wraps `talk.mode`.",
+      "Toggle talk mode on/off. Wraps `talk.mode`. Wire format (verified live against gateway 2026.4.12+): requires `enabled: boolean` — this is a SETTER, not a getter. Use `openclaw_talk_config` to read the current state.",
     inputSchema: withInstance(z
       .object({
-        mode: z.string().optional(),
+        enabled: z.boolean().describe("True to turn talk mode on, false to turn it off."),
       })
       .passthrough()),
     handler: passthroughHandler(client, "talk.mode"),
