@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-09
+
+> **Note**: this version was released alongside a `git filter-repo` history scrub that removed all personal/internal references (specific project names, real Discord/Telegram IDs, gateway hostnames) from prior commits. The npm tarballs of pre-0.6.0 versions remain immutable on the registry — they were deprecated with a redirect-to-0.6.0 message. Forks/clones predating 2026-05-09 should re-clone to pick up the rewritten history.
+
 ### Added
 
+- **`openclaw_secrets_set`** tool — convenience wrapper that pushes an arbitrary secret (API key, third-party token, …) into the gateway config tree via `config.patch` with a synthesized `mergePath`. Default scope is `secrets` (writes `config.secrets.<name>`); override with `scope` for skill-scoped secrets like `tools.linkedin-outreach`. The gateway has no `secrets.set` JSON-RPC method (only `reload` + `resolve`, and `resolve` is command-scoped, not arbitrary KV) — this tool fills that gap by leveraging `config.patch`.
 - **Architectural smoke test** (`tests/architectural.test.ts`) — vitest assertion that every registered tool wraps its input schema in `withInstance`, follows the `openclaw_*` naming convention, has no name collisions, has a non-empty description, and exports an async handler. Caught `openclaw_device_repair` missing `withInstance` on first run; that's the bug class it'll prevent in the future.
 - **`scripts/verify-all-tools.ts`** + `npm run verify:live` — pre-release regression guard. Boots the configured gateway client, round-trips ~45 read-only probes through the typed wrappers, and emits a JSON / human-readable report classifying outcomes as `ok` / `wrapper-zod-error` / `gateway-invalid-request` (= drift) / `gateway-other-error`. Exits non-zero on drift so CI can gate on it. CLI flags: `--json`, `--out report.json`, `--include foo,bar`, `--exclude doctor`. SEND-style tools (agent, send, chat.send, sessions.send) are excluded — probing them would trigger real agent turns / channel deliveries.
+- **`docs/integrations/linkedin-proxycurl-migration.md`** — generic reference pattern for migrating a `linkedin-outreach`-style skill from `li_at` cookie scraping to Proxycurl with cookie fallback. No personal/project references.
 
 ### Fixed (schema drifts caught by verify:live during this cycle)
 
