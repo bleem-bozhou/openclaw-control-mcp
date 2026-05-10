@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Single-item OS keychain bundle** — every secret (device private key, per-gateway device tokens, gateway tokens, gateway passwords) now lives in one `secrets-bundle` JSON item instead of N individual items. On macOS this drops the keychain access prompt count from 3-5 to 1 per process. Migration is lazy and transparent: when no bundle is present, the legacy individual items are still read on first load, and the next `save()` writes the bundle and deletes the legacy items best-effort. No env var to opt out — opting out of the keychain entirely (`OPENCLAW_USE_KEYCHAIN=0`) keeps the pre-0.5 plain-JSON behaviour.
+
+### Added
+
+- 3 new vitest cases covering bundle migration: legacy-only read fallback, first-save migrates and deletes legacy items, corrupt bundle falls back to legacy reads (197 total, was 194).
+
+### Documentation
+
+- **Wrapper passthrough fields** (`config.set.value`, `config.patch.mergeValue`, `node.invoke.params`, `system_event.payload`) now describe the intentional `z.unknown()` JSON-RPC passthrough in their Zod `.describe()` so MCP clients see the contract.
+
 ## [0.6.0] — 2026-05-09
 
 > **Note**: this version was released alongside a `git filter-repo` history scrub that removed all personal/internal references (specific project names, real Discord/Telegram IDs, gateway hostnames) from prior commits. The npm tarballs of pre-0.6.0 versions remain immutable on the registry — they were deprecated with a redirect-to-0.6.0 message. Forks/clones predating 2026-05-09 should re-clone to pick up the rewritten history.

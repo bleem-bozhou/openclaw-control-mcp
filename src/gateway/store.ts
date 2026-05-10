@@ -36,6 +36,26 @@ type StoreShape = {
 
 export const DEFAULT_INSTANCE = "default";
 
+/**
+ * Single keychain item that holds every secret as one JSON blob, so the OS
+ * keychain only prompts once per process lifetime instead of N times (one per
+ * legacy item: device-private-key, device-token:*, gateway-token:*,
+ * gateway-password:*). On macOS this collapses 3-5 prompts into 1; same gain
+ * on Linux libsecret.
+ *
+ * Migration is lazy: when the bundle is absent, we fall back to reading the
+ * legacy individual items, then the next save() writes the bundle and deletes
+ * the legacy items best-effort.
+ */
+const BUNDLE_KEY = "secrets-bundle";
+
+type SecretsBundleV1 = {
+  version: 1;
+  device?: { privateKey: string };
+  tokens?: Record<string, string>; // gatewayId -> token
+  configs?: Record<string, { gatewayToken?: string; gatewayPassword?: string }>;
+};
+
 const XDG_BASE = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
 const LEGACY_DIR = join(XDG_BASE, "openclaw-claw-mcp");
 const DEFAULT_DIR =
@@ -148,36 +168,102 @@ export class Store {
    * (mode 0600), matching pre-keychain 0.3.x behaviour. Avoids the failure
    * mode where a backend silently no-ops the write and the only copy of the
    * secret gets discarded (see docs/troubleshooting/empty-private-key.md).
+   *
+   * Since 0.6.1 every secret is collapsed into a single `secrets-bundle`
+   * keychain item — see BUNDLE_KEY — to slash the OS prompt count from N to 1.
+   * Legacy individual items are deleted best-effort after a successful bundle
+   * write, so first-save-after-upgrade migrates transparently.
    */
   private async stripSecretsToKeychain(state: StoreShape, kc: KeychainBackend): Promise<StoreShape> {
     const cleaned: StoreShape = JSON.parse(JSON.stringify(state));
+    const bundle: SecretsBundleV1 = { version: 1 };
+
     if (cleaned.device?.privateKey) {
-      const ok = await safeSet(kc, "device-private-key", cleaned.device.privateKey);
-      if (ok) cleaned.device = { ...cleaned.device, privateKey: "" };
+      bundle.device = { privateKey: cleaned.device.privateKey };
     }
     if (cleaned.tokens) {
+      const tokens: Record<string, string> = {};
       for (const [gatewayId, entry] of Object.entries(cleaned.tokens)) {
-        if (entry?.token) {
-          const ok = await safeSet(kc, `device-token:${gatewayId}`, entry.token);
-          if (ok) cleaned.tokens[gatewayId] = { ...entry, token: "" };
-        }
+        if (entry?.token) tokens[gatewayId] = entry.token;
+      }
+      if (Object.keys(tokens).length > 0) bundle.tokens = tokens;
+    }
+    if (cleaned.configs) {
+      const cfgs: Record<string, { gatewayToken?: string; gatewayPassword?: string }> = {};
+      for (const [instance, cfg] of Object.entries(cleaned.configs)) {
+        const slot: { gatewayToken?: string; gatewayPassword?: string } = {};
+        if (cfg.gatewayToken) slot.gatewayToken = cfg.gatewayToken;
+        if (cfg.gatewayPassword) slot.gatewayPassword = cfg.gatewayPassword;
+        if (slot.gatewayToken || slot.gatewayPassword) cfgs[instance] = slot;
+      }
+      if (Object.keys(cfgs).length > 0) bundle.configs = cfgs;
+    }
+
+    // Empty bundle — nothing left to persist. Drop the keychain item so a
+    // previously-written bundle doesn't keep stale secrets after a clear /
+    // repair operation.
+    const hasSecrets =
+      bundle.device !== undefined ||
+      (bundle.tokens && Object.keys(bundle.tokens).length > 0) ||
+      (bundle.configs && Object.keys(bundle.configs).length > 0);
+    if (!hasSecrets) {
+      await kc.delete(BUNDLE_KEY).catch(() => {
+        /* missing-item is fine */
+      });
+      return cleaned;
+    }
+
+    const ok = await safeSet(kc, BUNDLE_KEY, JSON.stringify(bundle));
+    if (!ok) {
+      // Keychain refused — preserve secrets in store.json (mode 0600). Same
+      // safety net as pre-bundle behaviour: never discard the only copy.
+      return cleaned;
+    }
+
+    // Bundle write succeeded — blank in-memory secrets so they don't leak to
+    // store.json on disk.
+    if (cleaned.device?.privateKey) cleaned.device = { ...cleaned.device, privateKey: "" };
+    if (cleaned.tokens) {
+      for (const [gatewayId, entry] of Object.entries(cleaned.tokens)) {
+        if (entry?.token) cleaned.tokens[gatewayId] = { ...entry, token: "" };
       }
     }
     if (cleaned.configs) {
       for (const [instance, cfg] of Object.entries(cleaned.configs)) {
-        if (cfg.gatewayToken) {
-          const ok = await safeSet(kc, `gateway-token:${instance}`, cfg.gatewayToken);
-          if (ok) cleaned.configs[instance] = { ...cfg, gatewayToken: "" };
-        }
-        if (cfg.gatewayPassword) {
-          const ok = await safeSet(kc, `gateway-password:${instance}`, cfg.gatewayPassword);
-          if (ok) {
-            cleaned.configs[instance] = { ...cleaned.configs[instance], gatewayPassword: "" };
-          }
-        }
+        cleaned.configs[instance] = { ...cfg, gatewayToken: "", gatewayPassword: "" };
       }
     }
+
+    // Best-effort migration cleanup: drop the legacy individual items so the
+    // keychain stops prompting for them on the next process. Errors here are
+    // non-fatal (the legacy items become dead weight, not a correctness bug).
+    await this.deleteLegacyItems(kc, cleaned);
     return cleaned;
+  }
+
+  /**
+   * Wipe every legacy individual keychain item that the bundle now supersedes.
+   * Best-effort — backends ignore errors on missing items, so calling this on
+   * a fresh keychain is harmless.
+   */
+  private async deleteLegacyItems(kc: KeychainBackend, state: StoreShape): Promise<void> {
+    const keys = new Set<string>(["device-private-key", "gateway-token", "gateway-password"]);
+    if (state.tokens) {
+      for (const gatewayId of Object.keys(state.tokens)) keys.add(`device-token:${gatewayId}`);
+    }
+    if (state.configs) {
+      for (const instance of Object.keys(state.configs)) {
+        keys.add(`gateway-token:${instance}`);
+        keys.add(`gateway-password:${instance}`);
+      }
+    }
+    await Promise.all(
+      [...keys].map((k) =>
+        kc.delete(k).catch(() => {
+          /* missing-item is fine */
+        }),
+      ),
+    );
   }
 
   /**
@@ -185,8 +271,57 @@ export class Store {
    * the keychain into the in-memory state. A field already populated wins
    * over the keychain (defensive: lets the user override via env or the
    * legacy store.json without surprise).
+   *
+   * Since 0.6.1 reads the single `secrets-bundle` item first (1 OS prompt at
+   * most). When that item is absent (fresh install, opted out, or pre-0.6.1
+   * data), falls back to the legacy per-item reads (N prompts) — the next
+   * save() will then write the bundle and migrate transparently.
    */
   private async hydrateSecretsFromKeychain(state: StoreShape, kc: KeychainBackend): Promise<void> {
+    const bundle = await this.readBundle(kc);
+    if (bundle) {
+      this.applyBundleToState(state, bundle);
+      return;
+    }
+    await this.hydrateFromLegacyItems(state, kc);
+  }
+
+  private async readBundle(kc: KeychainBackend): Promise<SecretsBundleV1 | null> {
+    const raw = await kc.get(BUNDLE_KEY);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as SecretsBundleV1;
+      if (parsed?.version === 1) return parsed;
+      return null;
+    } catch {
+      // Corrupt bundle — treat as absent so the legacy fallback can save the
+      // session, and the next save() rewrites a clean bundle.
+      return null;
+    }
+  }
+
+  private applyBundleToState(state: StoreShape, bundle: SecretsBundleV1): void {
+    if (state.device && !state.device.privateKey && bundle.device?.privateKey) {
+      state.device.privateKey = bundle.device.privateKey;
+    }
+    if (state.tokens && bundle.tokens) {
+      for (const [gatewayId, entry] of Object.entries(state.tokens)) {
+        if (entry && !entry.token && bundle.tokens[gatewayId]) {
+          entry.token = bundle.tokens[gatewayId];
+        }
+      }
+    }
+    if (state.configs && bundle.configs) {
+      for (const [instance, cfg] of Object.entries(state.configs)) {
+        const slot = bundle.configs[instance];
+        if (!slot) continue;
+        if (!cfg.gatewayToken && slot.gatewayToken) cfg.gatewayToken = slot.gatewayToken;
+        if (!cfg.gatewayPassword && slot.gatewayPassword) cfg.gatewayPassword = slot.gatewayPassword;
+      }
+    }
+  }
+
+  private async hydrateFromLegacyItems(state: StoreShape, kc: KeychainBackend): Promise<void> {
     if (state.device && !state.device.privateKey) {
       const v = await kc.get("device-private-key");
       if (v) state.device.privateKey = v;
@@ -262,6 +397,8 @@ export class Store {
     }
     const kc = await this.getKeychain();
     if (kc) await kc.delete(`device-token:${gatewayId}`);
+    // save() above already rewrote the bundle without this gatewayId, so
+    // there's no separate bundle update needed.
   }
 
   /**
@@ -337,7 +474,10 @@ export class Store {
     const kc = await this.getKeychain();
     if (!kc) return;
     if (instance == null) {
-      // Best-effort: forget every namespaced + legacy secret for configs we knew about.
+      // Bundle was rewritten by save() (or the configs are gone, so the
+      // bundle would only hold device + tokens now). Wipe every legacy
+      // namespaced + un-namespaced individual item for safety; the bundle
+      // itself is already up-to-date.
       const keysToDelete = new Set<string>(["gateway-token", "gateway-password"]);
       for (const inst of knownInstances) {
         keysToDelete.add(`gateway-token:${inst}`);
@@ -419,7 +559,9 @@ export class Store {
     await this.save(beforeState);
 
     // Wipe the matching keychain entries (device key + per-gateway tokens
-    // that were present before the wipe).
+    // that were present before the wipe). The save() above already rewrote
+    // the bundle without device/tokens, so the bundle is in sync — but we
+    // also nuke the legacy individual items for cleanliness.
     const kc = await this.getKeychain();
     if (kc) {
       await kc.delete("device-private-key");

@@ -64,10 +64,22 @@ describe("resolveKeychainBackend always returns something", () => {
   });
 });
 
-describe("Store + InMemoryKeychain — secret splitting", () => {
+describe("Store + InMemoryKeychain — secret splitting (bundle since 0.6.1)", () => {
   let dir: string;
   let kc: InMemoryKeychain;
   let store: Store;
+
+  // Helper: parse the single secrets-bundle item that holds every secret.
+  type Bundle = {
+    version: 1;
+    device?: { privateKey: string };
+    tokens?: Record<string, string>;
+    configs?: Record<string, { gatewayToken?: string; gatewayPassword?: string }>;
+  };
+  const bundle = (): Bundle | null => {
+    const raw = kc.entries.get("secrets-bundle");
+    return raw ? (JSON.parse(raw) as Bundle) : null;
+  };
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "openclaw-store-test-"));
@@ -79,7 +91,7 @@ describe("Store + InMemoryKeychain — secret splitting", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("strips secrets from store.json on save and pushes them to keychain", async () => {
+  it("strips secrets from store.json on save and pushes them to the bundle", async () => {
     await store.saveDevice({
       deviceId: "deadbeef",
       publicKey: "PUBKEY",
@@ -92,10 +104,12 @@ describe("Store + InMemoryKeychain — secret splitting", () => {
     };
     expect(json.device?.publicKey).toBe("PUBKEY"); // public stays in JSON
     expect(json.device?.privateKey).toBe(""); // secret blanked in JSON
-    expect(kc.entries.get("device-private-key")).toBe("SECRET-PRIVATE-KEY");
+    expect(bundle()?.device?.privateKey).toBe("SECRET-PRIVATE-KEY");
+    // The legacy individual item must NOT be created any more.
+    expect(kc.entries.has("device-private-key")).toBe(false);
   });
 
-  it("hydrates secrets from keychain on load", async () => {
+  it("hydrates secrets from the bundle on load", async () => {
     await store.saveDevice({
       deviceId: "deadbeef",
       publicKey: "PUBKEY",
@@ -110,12 +124,15 @@ describe("Store + InMemoryKeychain — secret splitting", () => {
     expect(device?.publicKey).toBe("PUBKEY");
   });
 
-  it("splits per-gateway tokens correctly", async () => {
+  it("packs every per-gateway token into the bundle", async () => {
     await store.saveToken("gw-aaa", { token: "TOKEN-AAA", role: "operator", scopes: [], savedAtMs: 1 });
     await store.saveToken("gw-bbb", { token: "TOKEN-BBB", role: "operator", scopes: [], savedAtMs: 2 });
 
-    expect(kc.entries.get("device-token:gw-aaa")).toBe("TOKEN-AAA");
-    expect(kc.entries.get("device-token:gw-bbb")).toBe("TOKEN-BBB");
+    expect(bundle()?.tokens?.["gw-aaa"]).toBe("TOKEN-AAA");
+    expect(bundle()?.tokens?.["gw-bbb"]).toBe("TOKEN-BBB");
+    // No per-token legacy items.
+    expect(kc.entries.has("device-token:gw-aaa")).toBe(false);
+    expect(kc.entries.has("device-token:gw-bbb")).toBe(false);
 
     const json = JSON.parse(readFileSync(join(dir, "store.json"), "utf8")) as {
       tokens: Record<string, { token: string }>;
@@ -124,22 +141,26 @@ describe("Store + InMemoryKeychain — secret splitting", () => {
     expect(json.tokens["gw-bbb"].token).toBe("");
   });
 
-  it("clearToken removes both the JSON entry and the keychain secret", async () => {
+  it("clearToken removes the token from both the JSON and the bundle", async () => {
     await store.saveToken("gw-zzz", { token: "TOKEN-ZZZ", role: "operator", scopes: [], savedAtMs: 1 });
-    expect(kc.entries.has("device-token:gw-zzz")).toBe(true);
+    expect(bundle()?.tokens?.["gw-zzz"]).toBe("TOKEN-ZZZ");
 
     await store.clearToken("gw-zzz");
-    expect(kc.entries.has("device-token:gw-zzz")).toBe(false);
+    expect(bundle()?.tokens?.["gw-zzz"]).toBeUndefined();
   });
 
-  it("config secrets (gatewayToken, gatewayPassword) get split too", async () => {
+  it("packs config secrets (gatewayToken, gatewayPassword) into the bundle", async () => {
     await store.saveConfig({
       gatewayUrl: "wss://x",
       gatewayToken: "TOKEN-CFG",
       gatewayPassword: "PWD-CFG",
     });
-    expect(kc.entries.get("gateway-token:default")).toBe("TOKEN-CFG");
-    expect(kc.entries.get("gateway-password:default")).toBe("PWD-CFG");
+    expect(bundle()?.configs?.default.gatewayToken).toBe("TOKEN-CFG");
+    expect(bundle()?.configs?.default.gatewayPassword).toBe("PWD-CFG");
+    // No per-instance legacy items.
+    expect(kc.entries.has("gateway-token:default")).toBe(false);
+    expect(kc.entries.has("gateway-password:default")).toBe(false);
+
     const json = JSON.parse(readFileSync(join(dir, "store.json"), "utf8")) as {
       configs: Record<string, { gatewayUrl: string; gatewayToken: string; gatewayPassword: string }>;
     };
@@ -148,12 +169,11 @@ describe("Store + InMemoryKeychain — secret splitting", () => {
     expect(json.configs.default.gatewayPassword).toBe("");
   });
 
-  it("clearConfig wipes both the JSON config and the keychain secrets", async () => {
+  it("clearConfig wipes both the JSON config and the bundle slot", async () => {
     await store.saveConfig({ gatewayUrl: "wss://x", gatewayToken: "T", gatewayPassword: "P" });
-    expect(kc.entries.has("gateway-token:default")).toBe(true);
+    expect(bundle()?.configs?.default.gatewayToken).toBe("T");
     await store.clearConfig();
-    expect(kc.entries.has("gateway-token:default")).toBe(false);
-    expect(kc.entries.has("gateway-password:default")).toBe(false);
+    expect(bundle()?.configs?.default).toBeUndefined();
   });
 
   it("does NOT blank privateKey when keychain.set throws (lossy NoopBackend scenario)", async () => {
@@ -223,11 +243,20 @@ describe("Store.deviceIntegrity + repairDevice", () => {
   });
 
   it("repairDevice wipes device + tokens, backs up store.json, drops keychain entries", async () => {
+    type Bundle = {
+      device?: { privateKey: string };
+      tokens?: Record<string, string>;
+    };
+    const bundle = (): Bundle | null => {
+      const raw = kc.entries.get("secrets-bundle");
+      return raw ? (JSON.parse(raw) as Bundle) : null;
+    };
+
     await store.saveDevice({ deviceId: "x", publicKey: "PK", privateKey: "SK", createdAtMs: 1 });
     await store.saveToken("gw-1", { token: "T1", role: "operator", scopes: [], savedAtMs: 1 });
     await store.saveToken("gw-2", { token: "T2", role: "operator", scopes: [], savedAtMs: 2 });
-    expect(kc.entries.has("device-private-key")).toBe(true);
-    expect(kc.entries.has("device-token:gw-1")).toBe(true);
+    expect(bundle()?.device?.privateKey).toBe("SK");
+    expect(bundle()?.tokens?.["gw-1"]).toBe("T1");
 
     const result = await store.repairDevice();
     expect(result.wiped.device).toBe(true);
@@ -237,8 +266,11 @@ describe("Store.deviceIntegrity + repairDevice", () => {
     // Backup actually exists.
     expect(readFileSync(result.backupPath as string, "utf8")).toContain("PK");
 
-    // Device + tokens removed from disk + keychain.
+    // Device + tokens removed from disk + bundle.
     expect(await store.loadDevice()).toBeUndefined();
+    expect(bundle()?.device).toBeUndefined();
+    expect(bundle()?.tokens).toBeUndefined();
+    // Legacy individual items also wiped (defensive — repairDevice still nukes them in case of leftovers).
     expect(kc.entries.has("device-private-key")).toBe(false);
     expect(kc.entries.has("device-token:gw-1")).toBe(false);
     expect(kc.entries.has("device-token:gw-2")).toBe(false);
@@ -299,5 +331,126 @@ describe("Store without keychain (legacy 0.3.x behaviour)", () => {
   it("creates the file at the expected path", async () => {
     await store.saveConfig({ gatewayUrl: "wss://x" });
     expect(existsSync(join(dir, "store.json"))).toBe(true);
+  });
+});
+
+describe("Store + InMemoryKeychain — bundle migration from legacy 0.6.0 items", () => {
+  let dir: string;
+  let kc: InMemoryKeychain;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "openclaw-store-migrate-"));
+    kc = new InMemoryKeychain();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Mimics the on-keychain layout from 0.4.0 → 0.6.0: per-secret items, no bundle.
+  function seedLegacyItems(opts: {
+    devicePrivateKey?: string;
+    deviceTokens?: Record<string, string>;
+    gatewayToken?: string;
+    gatewayPassword?: string;
+  }): void {
+    if (opts.devicePrivateKey) kc.entries.set("device-private-key", opts.devicePrivateKey);
+    if (opts.deviceTokens) {
+      for (const [id, t] of Object.entries(opts.deviceTokens)) kc.entries.set(`device-token:${id}`, t);
+    }
+    if (opts.gatewayToken) kc.entries.set("gateway-token:default", opts.gatewayToken);
+    if (opts.gatewayPassword) kc.entries.set("gateway-password:default", opts.gatewayPassword);
+  }
+
+  it("falls back to legacy items when no bundle is present", async () => {
+    seedLegacyItems({
+      devicePrivateKey: "LEGACY-SK",
+      deviceTokens: { "gw-1": "LEGACY-DEV-TOKEN" },
+      gatewayToken: "LEGACY-GW-TOKEN",
+    });
+    // Mirror the on-disk shape that would coexist with the legacy keychain
+    // items: secrets blanked, structure intact.
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(
+      join(dir, "store.json"),
+      JSON.stringify({
+        version: 2,
+        device: { deviceId: "x", publicKey: "PK", privateKey: "", createdAtMs: 1 },
+        tokens: { "gw-1": { token: "", role: "operator", scopes: [], savedAtMs: 1 } },
+        configs: { default: { gatewayUrl: "wss://x", gatewayToken: "" } },
+        defaultInstance: "default",
+      }),
+      "utf8",
+    );
+
+    const store = new Store(dir, "store.json", { keychain: kc });
+    const device = await store.loadDevice();
+    expect(device?.privateKey).toBe("LEGACY-SK");
+    const token = await store.loadToken("gw-1");
+    expect(token?.token).toBe("LEGACY-DEV-TOKEN");
+    const cfg = await store.loadConfig();
+    expect(cfg.gatewayToken).toBe("LEGACY-GW-TOKEN");
+  });
+
+  it("first save() after migration writes the bundle and deletes the legacy items", async () => {
+    seedLegacyItems({
+      devicePrivateKey: "LEGACY-SK",
+      deviceTokens: { "gw-1": "LEGACY-DEV-TOKEN" },
+      gatewayToken: "LEGACY-GW-TOKEN",
+      gatewayPassword: "LEGACY-PWD",
+    });
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(
+      join(dir, "store.json"),
+      JSON.stringify({
+        version: 2,
+        device: { deviceId: "x", publicKey: "PK", privateKey: "", createdAtMs: 1 },
+        tokens: { "gw-1": { token: "", role: "operator", scopes: [], savedAtMs: 1 } },
+        configs: { default: { gatewayUrl: "wss://x", gatewayToken: "", gatewayPassword: "" } },
+        defaultInstance: "default",
+      }),
+      "utf8",
+    );
+
+    const store = new Store(dir, "store.json", { keychain: kc });
+    // Trigger a save — any setDefaultInstance / saveConfig call would do; we
+    // use saveConfig with the same URL since it's idempotent semantically.
+    await store.saveConfig({ gatewayUrl: "wss://x" });
+
+    // Bundle now contains every secret …
+    const raw = kc.entries.get("secrets-bundle");
+    expect(raw).toBeTruthy();
+    const bundle = JSON.parse(raw as string) as {
+      device: { privateKey: string };
+      tokens: Record<string, string>;
+      configs: Record<string, { gatewayToken?: string; gatewayPassword?: string }>;
+    };
+    expect(bundle.device.privateKey).toBe("LEGACY-SK");
+    expect(bundle.tokens["gw-1"]).toBe("LEGACY-DEV-TOKEN");
+    expect(bundle.configs.default.gatewayToken).toBe("LEGACY-GW-TOKEN");
+    expect(bundle.configs.default.gatewayPassword).toBe("LEGACY-PWD");
+
+    // … and the legacy items are gone.
+    expect(kc.entries.has("device-private-key")).toBe(false);
+    expect(kc.entries.has("device-token:gw-1")).toBe(false);
+    expect(kc.entries.has("gateway-token:default")).toBe(false);
+    expect(kc.entries.has("gateway-password:default")).toBe(false);
+  });
+
+  it("falls back to legacy items when the bundle is corrupt JSON", async () => {
+    kc.entries.set("secrets-bundle", "{not valid json");
+    seedLegacyItems({ devicePrivateKey: "FALLBACK-SK" });
+    const fs = await import("node:fs/promises");
+    await fs.writeFile(
+      join(dir, "store.json"),
+      JSON.stringify({
+        version: 2,
+        device: { deviceId: "x", publicKey: "PK", privateKey: "", createdAtMs: 1 },
+      }),
+      "utf8",
+    );
+    const store = new Store(dir, "store.json", { keychain: kc });
+    const device = await store.loadDevice();
+    expect(device?.privateKey).toBe("FALLBACK-SK");
   });
 });
