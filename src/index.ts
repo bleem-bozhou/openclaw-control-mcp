@@ -13,7 +13,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { formatAgo } from "./format.js";
 import { GatewayClient } from "./gateway/client.js";
 import { MockGateway } from "./gateway/mock.js";
-import { Store } from "./gateway/store.js";
+import { mergeCreds, Store } from "./gateway/store.js";
 import type { CallOpts, ToolClient } from "./tools/client.js";
 import { getMcpVersion } from "./version.js";
 import { buildAdminTools } from "./tools/admin.js";
@@ -69,14 +69,15 @@ let activeInstance: string | null = null;
 const ENV_INSTANCE = "__env__";
 
 async function ensureClient(instance?: string): Promise<{ client: GatewayClient; name: string }> {
-  // Env-var override is treated as a synthetic "__env__" instance — wins when set.
+  // Env wins per-field (since 0.6.2). When ENV_URL is unset we still load the
+  // store to find the URL, but ENV_TOKEN / ENV_PASSWORD override the store
+  // values when set — so `OPENCLAW_GATEWAY_TOKEN=… node …` does what users
+  // expect even without ENV_URL alongside.
   let url = ENV_URL;
   let token = ENV_TOKEN;
   let password = ENV_PASSWORD;
   let resolvedName = ENV_INSTANCE;
-  if (url) {
-    // Use env vars regardless of `instance` param — env wins over store.
-  } else {
+  if (!url) {
     const { configs, defaultInstance } = await store.loadConfigs();
     resolvedName = instance ?? defaultInstance;
     const cfg = configs[resolvedName];
@@ -88,8 +89,11 @@ async function ensureClient(instance?: string): Promise<{ client: GatewayClient;
       );
     }
     url = cfg.gatewayUrl;
-    token = cfg.gatewayToken;
-    password = cfg.gatewayPassword;
+    // Merge per-field: env > store. Empty strings in the store are treated
+    // as missing — see mergeCreds in src/gateway/store.ts.
+    const merged = mergeCreds({ token, password }, cfg);
+    token = merged.token;
+    password = merged.password;
   }
   let client = clients.get(resolvedName);
   if (!client) {

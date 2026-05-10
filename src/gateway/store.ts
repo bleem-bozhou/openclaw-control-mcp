@@ -575,6 +575,26 @@ export class Store {
 }
 
 /**
+ * Per-field credential merge. Env wins when set; store fills in the rest.
+ * Empty strings in the store (e.g. post-wipe state where `gatewayToken: ""`)
+ * are treated as missing so a freshly-set env var still does what users
+ * expect. Pure function — no I/O — so it's trivially testable.
+ *
+ * Used by `ensureClient` in `src/index.ts` to fix the pre-0.6.2 surprise
+ * where setting only `OPENCLAW_GATEWAY_TOKEN` (without `OPENCLAW_GATEWAY_URL`)
+ * silently kept the empty store token and sent `auth: {}` to the gateway.
+ */
+export function mergeCreds(
+  env: { token?: string; password?: string },
+  storeCfg: { gatewayToken?: string; gatewayPassword?: string },
+): { token: string | undefined; password: string | undefined } {
+  return {
+    token: env.token ?? (storeCfg.gatewayToken || undefined),
+    password: env.password ?? (storeCfg.gatewayPassword || undefined),
+  };
+}
+
+/**
  * Attempt a keychain write and report whether it succeeded. Backends like
  * NoopBackend throw — we treat that as failure (caller keeps the secret in
  * the on-disk JSON instead of discarding it). Real backends (macOS, libsecret)
