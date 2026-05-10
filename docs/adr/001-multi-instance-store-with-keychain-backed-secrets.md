@@ -40,3 +40,15 @@ Secrets are split into the keychain on save **only when the keychain `set` actua
 
 - **Single global config** (pre-0.4 design). Forces a `setup` round-trip every time the user wants a different gateway. Rejected — too much friction for the multi-gateway use case.
 - **OS keychain only** (no JSON fallback). Breaks on Windows / WSL / hosts without `secret-tool`. Rejected — the legacy plain-JSON path stays so the package works everywhere.
+
+## Evolution — 0.6.1: single keychain item bundle
+
+Pre-0.6.1 the keychain layout used one item per secret: `device-private-key`, `device-token:<gatewayId>`, `gateway-token:<instance>`, `gateway-password:<instance>`. Each item carries its own ACL on macOS, so a fresh process triggered 3-5 separate "Allow keychain access" prompts. `-T /usr/bin/security` did not transitively cover the Node parent process, so the prompt count stayed high even with "Always Allow" clicked once.
+
+Since 0.6.1 every secret is bundled into a single `secrets-bundle` JSON item (`{ version: 1, device, tokens, configs }`). Net effects:
+- 1 OS prompt per process at most, instead of 3-5.
+- Migration is lazy and transparent: when no bundle is present, the legacy individual items are read on first load, then the next `save()` writes the bundle and deletes the legacy items best-effort.
+- The lossy-keychain safety net is preserved — secrets stay in `store.json` (mode 0600) when the bundle write fails.
+- Corrupt bundle falls back to the legacy reads, then rewrites a clean bundle on next save.
+
+The keychain backend interface (`KeychainBackend.get/set/delete`) is unchanged — the bundle is purely a Store-side packaging decision.

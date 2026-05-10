@@ -102,7 +102,7 @@ Restart Claude Code — `openclaw_cron_list` and friends will be available.
 | `OPENCLAW_TIMEOUT_MS` | optional | Connect / request timeout (default 30000) |
 | `OPENCLAW_DEBUG` | optional | Set to `1` to log every WS frame to stderr |
 | `OPENCLAW_CONTROL_HOME` | optional | Override the directory used to persist `store.json` (defaults to `${XDG_CONFIG_HOME:-~/.config}/openclaw-control-mcp/`). The legacy `OPENCLAW_CLAW_HOME` is still read as a fallback. |
-| `OPENCLAW_USE_KEYCHAIN` | optional | Default ON since 0.5.0 — secrets land in the OS keychain (macOS `security`, Linux `secret-tool`) when one is available, else stay in `store.json`. Set to `0` or `false` to opt out and force plain JSON. |
+| `OPENCLAW_USE_KEYCHAIN` | optional | Default ON since 0.5.0 — secrets land in the OS keychain (macOS `security`, Linux `secret-tool`) when one is available, else stay in `store.json`. Since 0.6.1 every secret is collapsed into a single keychain item (one OS prompt per process instead of 3-5). Click "Always Allow" once to clear future prompts on the same install. Set the env var to `0` or `false` to opt out and force plain JSON. |
 | `OPENCLAW_HTTP` | optional | Set to `1` to expose the MCP over Streamable HTTP at `/mcp` instead of stdio. Equivalent to passing `--http`. |
 | `OPENCLAW_HTTP_PORT` | optional | HTTP port (default `3333`). Equivalent to `--http-port=N`. |
 | `OPENCLAW_HTTP_HOST` | optional | HTTP host (default `127.0.0.1`). Equivalent to `--http-host=H`. |
