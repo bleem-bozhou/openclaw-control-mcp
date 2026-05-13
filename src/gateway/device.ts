@@ -7,11 +7,11 @@ export type DeviceIdentity = {
   privateKey: string;
 };
 
-function toBase64Url(bytes: Uint8Array): string {
+export function toBase64Url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
-function fromBase64Url(s: string): Uint8Array {
+export function fromBase64Url(s: string): Uint8Array {
   const norm = s.replaceAll("-", "+").replaceAll("_", "/");
   const pad = norm + "=".repeat((4 - (norm.length % 4)) % 4);
   return new Uint8Array(Buffer.from(pad, "base64"));

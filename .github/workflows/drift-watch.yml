@@ -17,8 +17,12 @@
 #   - Network reachability to the gateway URL configured in the repo secret
 #
 # Required repo secrets:
-#   - OPENCLAW_GATEWAY_URL    e.g. ws://127.0.0.1:18789/v1/ws when colocated
-#   - OPENCLAW_GATEWAY_TOKEN  admin/operator token (no device-pair needed for read-only probes)
+#   - OPENCLAW_GATEWAY_URL        e.g. ws://127.0.0.1:18789/v1/ws when colocated
+#   - OPENCLAW_GATEWAY_TOKEN      admin/operator token
+#   - OPENCLAW_DEVICE_PRIVATE_KEY base64url Ed25519 seed (pre-paired device)
+#   - OPENCLAW_DEVICE_TOKEN       device token issued by the gateway after pairing
+#
+# To generate the device secrets, see docs/ci-device-secrets.md
 #
 # Schedule: Monday 09:00 UTC. Trigger manually with `gh workflow run drift-watch.yml`.
 name: Drift Watch
@@ -53,6 +57,8 @@ jobs:
         env:
           OPENCLAW_GATEWAY_URL: ${{ secrets.OPENCLAW_GATEWAY_URL }}
           OPENCLAW_GATEWAY_TOKEN: ${{ secrets.OPENCLAW_GATEWAY_TOKEN }}
+          OPENCLAW_DEVICE_PRIVATE_KEY: ${{ secrets.OPENCLAW_DEVICE_PRIVATE_KEY }}
+          OPENCLAW_DEVICE_TOKEN: ${{ secrets.OPENCLAW_DEVICE_TOKEN }}
         run: |
           set +e
           npx tsx scripts/verify-all-tools.ts --json --out drift-report.json

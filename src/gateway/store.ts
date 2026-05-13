@@ -3,8 +3,52 @@ import { mkdir, readFile, writeFile, chmod } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import type { DeviceIdentity } from "./device.js";
+import * as ed from "@noble/ed25519";
+import { type DeviceIdentity, fromBase64Url, toBase64Url } from "./device.js";
 import { type KeychainBackend, maybeKeychainBackend } from "./keychain.js";
+
+const DEFAULT_DEVICE_SCOPES = ["operator.admin", "operator.read", "operator.write"];
+
+/**
+ * Read a runtime-injected device identity from env vars. Only
+ * OPENCLAW_DEVICE_PRIVATE_KEY is required — publicKey + deviceId are derived
+ * from it so callers can rotate a single secret. Enables stateless CI / service
+ * accounts where there's no on-disk store to persist a paired device. Returns
+ * undefined when the env var is absent so the regular store-based flow runs.
+ */
+export async function loadDeviceFromEnv(): Promise<
+  (DeviceIdentity & { createdAtMs: number }) | undefined
+> {
+  const priv = process.env.OPENCLAW_DEVICE_PRIVATE_KEY?.trim();
+  if (!priv) return undefined;
+  const privBytes = fromBase64Url(priv);
+  if (privBytes.length !== 32) {
+    throw new Error(
+      `OPENCLAW_DEVICE_PRIVATE_KEY must be a base64url-encoded 32-byte Ed25519 seed (got ${privBytes.length} bytes after decoding)`,
+    );
+  }
+  const pubBytes = await ed.getPublicKeyAsync(privBytes);
+  const publicKey = toBase64Url(pubBytes);
+  const deviceId = createHash("sha256").update(pubBytes).digest("hex");
+  return { deviceId, publicKey, privateKey: priv, createdAtMs: Date.now() };
+}
+
+/**
+ * Read a runtime-injected device token from env vars. Pairs with
+ * loadDeviceFromEnv for stateless CI: the operator pre-pairs a device and
+ * stores the resulting privateKey + token as secrets. OPENCLAW_DEVICE_TOKEN is
+ * the only required field; role + scopes fall back to operator defaults.
+ */
+export function loadTokenFromEnv(): DeviceTokenEntry | undefined {
+  const token = process.env.OPENCLAW_DEVICE_TOKEN?.trim();
+  if (!token) return undefined;
+  const role = process.env.OPENCLAW_DEVICE_ROLE?.trim() || "operator";
+  const rawScopes = process.env.OPENCLAW_DEVICE_SCOPES?.trim();
+  const scopes = rawScopes
+    ? rawScopes.split(",").map((s) => s.trim()).filter(Boolean)
+    : [...DEFAULT_DEVICE_SCOPES];
+  return { token, role, scopes, savedAtMs: Date.now() };
+}
 
 export type DeviceTokenEntry = {
   token: string;
@@ -367,6 +411,8 @@ export class Store {
   }
 
   async loadDevice(): Promise<(DeviceIdentity & { createdAtMs: number }) | undefined> {
+    const fromEnv = await loadDeviceFromEnv();
+    if (fromEnv) return fromEnv;
     const s = await this.load();
     return s.device;
   }
@@ -378,6 +424,8 @@ export class Store {
   }
 
   async loadToken(gatewayId: string): Promise<DeviceTokenEntry | undefined> {
+    const fromEnv = loadTokenFromEnv();
+    if (fromEnv) return fromEnv;
     const s = await this.load();
     return s.tokens?.[gatewayId];
   }

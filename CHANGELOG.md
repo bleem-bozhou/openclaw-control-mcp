@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Env-based device credentials** for headless / CI usage. `OPENCLAW_DEVICE_PRIVATE_KEY` (base64url Ed25519 seed) and `OPENCLAW_DEVICE_TOKEN`, when set, take priority over the on-disk store. `publicKey` and `deviceId` are derived from the private key, so only one secret needs rotating to change the identity. Optional `OPENCLAW_DEVICE_ROLE` and `OPENCLAW_DEVICE_SCOPES` (comma-separated) override the defaults. Unblocks stateless runners (GitHub Actions, ephemeral containers, service accounts) which previously hit `GatewayError: pairing required` because each invocation generated a fresh ephemeral device. 11 new vitest cases (210 total, was 199).
+- **`docs/ci-device-secrets.md`** — runbook for provisioning the secrets, both by extracting them from an existing local keychain bundle (Option A) and by creating a dedicated CI device (Option B).
+
+### Changed
+
+- **`scripts/verify-all-tools.ts` resolves credentials env-first**, matching `src/index.ts`. Without this, running the verify script from a CI runner with `OPENCLAW_GATEWAY_URL` / `OPENCLAW_GATEWAY_TOKEN` set but no on-disk store failed immediately with "no gateway configured" because `Store.loadConfig()` only reads the persisted state.
+
+### Internals
+
+- **`.github/workflows/drift-watch.yml`** — weekly + on-demand workflow that runs `verify:live` on a self-hosted runner, uploads the JSON report as a 90-day artifact, and opens a labelled issue on drift (or on a fatal run failure). Self-hosted because the gateway port isn't reachable from GitHub Actions' hosted IP ranges.
+- `toBase64Url` / `fromBase64Url` exported from `src/gateway/device.ts` so the env-credential helper can reuse them.
+
 ## [0.6.2] — 2026-05-13
 
 ### Fixed
