@@ -10,6 +10,26 @@
 
 > Different from the upstream [`openclaw-mcp`](https://www.npmjs.com/package/openclaw-mcp), which only wraps `/v1/chat/completions`. This one talks the JSON-RPC protocol used by the OpenClaw Control panel — so you can operate the gateway itself (its crons, sessions, agents, channels, skills, secrets, …), not just chat through it.
 
+## Without vs with
+
+**Without `openclaw-control-mcp`** — you bounce between the Control panel UI, your terminal, and Claude Code. "List my crons" means opening the SPA. "Tail this agent session" means staying in the panel and refreshing. "Why did this skill fail?" means hunting through `logs.tail` manually. The assistant can chat through the gateway but it cannot **operate** it.
+
+**With `openclaw-control-mcp`** — the same assistant queries `openclaw_cron_list`, follows up with `openclaw_sessions_tail` to watch a turn in flight, asks `openclaw_skills_status` for diagnostic data, rotates a secret via `openclaw_secrets_set`, and approves a stuck `openclaw_exec_approval` — without you ever leaving the chat. The Control panel becomes an *audit interface*, not a daily-driver.
+
+## Quickstart
+
+```bash
+# Claude Code — registers a stdio server under the default config
+claude mcp add openclaw-control -- npx -y openclaw-control-mcp
+```
+
+One-click install from supported clients:
+
+[![Install in Cursor](https://img.shields.io/badge/Cursor-install-black?logo=cursor)](cursor://anysphere.cursor-deeplink/mcp/install?name=openclaw-control&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIm9wZW5jbGF3LWNvbnRyb2wtbWNwIl19)
+[![Install in VS Code](https://img.shields.io/badge/VS%20Code-install-blue?logo=visualstudiocode)](vscode:mcp/install?%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22openclaw-control-mcp%22%5D%7D)
+
+On first start the wrapper generates an Ed25519 device identity and surfaces a `pairing request id`. Approve it once in the OpenClaw Control panel, the gateway issues a device token, and every subsequent call uses it transparently. Full pairing flow below.
+
 ## Status
 
 **0.6.2** — published on npm, indexed on the official MCP Registry as `io.github.smurfy92/openclaw-control-mcp`. Multi-instance gateway configs, OS keychain-backed secret storage, 134 typed tools across the 128 published JSON-RPC methods, plus two escape hatches: `openclaw_introspect` enumerates every method/event the gateway publishes in its `hello-ok`, and `openclaw_call` lets you reach any method that doesn't have a typed wrapper yet — so new gateway endpoints are reachable without waiting on a release.
@@ -351,11 +371,26 @@ Prints a JSON report (MCP version, gateway URL, paired state, scopes, server ver
 
 Most v0.3.0 wrappers use `z.passthrough()` for params — they accept the documented fields plus anything else, and pass them through to the gateway. This trades strict client-side validation for forward-compat: as the gateway evolves, calls don't break on new fields. The downside is you'll only learn about a wrong field when the gateway rejects the request. If you hit a "missing required property" error, look at the gateway's response — it tells you the exact wire shape — and either correct your call, or open an issue / PR to tighten the wrapper's Zod schema.
 
+## Threat model
+
+This MCP server exposes secret-bearing and side-effectful gateway operations (`config.*`, `secrets.*`, `cron.run`, `sessions.send`, `agent`, channel send) to an LLM that the operator drives via natural language. Treat that surface deliberately:
+
+- **The gateway token, device private key, and per-gateway device tokens** are persisted under `${XDG_CONFIG_HOME:-~/.config}/openclaw-control-mcp/store.json` (file mode `0600`) and — when an OS keychain is available — bundled into one keychain item (macOS `security`, Linux libsecret). The store file alone never contains plaintext secrets when the keychain is active. Never commit the store or post screenshots of `--health` output unredacted.
+- **`openclaw_secrets_set` writes into the gateway config tree** via `config.patch`. Any tool call that reaches this wrapper rotates the underlying secret in the gateway's view. Wrap it with explicit human confirmation in agent prompts.
+- **`openclaw_call` is an escape hatch** — it forwards arbitrary JSON-RPC method calls. The gateway enforces per-scope permissions, but on the client side there's no input filter. Limit which tool catalogs your agent can see if untrusted prompts can reach it.
+- **`OPENCLAW_DEVICE_PRIVATE_KEY` / `OPENCLAW_DEVICE_TOKEN` env vars** (for headless / CI / service-account usage) take priority over the store. Set them only in trusted execution contexts (GitHub secrets, K8s secrets, password manager exports — not in shell history, Docker `--env`, or `.env` files committed to the repo).
+- **Prompt-injection surface**: the gateway's responses (session previews, logs, agent outputs) feed back into the MCP client and can carry attacker-controlled content. Treat any tool output as untrusted when deciding whether to call destructive tools (the destructive list is published in §Destructive tools — confirm before chaining a write tool to a read tool output).
+- **Network transport** is currently stdio only (per-process WebSocket to the gateway). When HTTP/SSE transport lands (planned 0.7), the same threat-model section will get an addendum on bearer-token handling at the HTTP layer.
+
+If you find a vulnerability, please open a private security advisory on GitHub rather than a public issue: <https://github.com/smurfy92/openclaw-control-mcp/security/advisories/new>.
+
 ## Roadmap
 
 - Auto-reconnect with backoff (currently single-shot — Claude Code respawns the stdio process on demand).
 - Stream session messages back into the MCP client (currently `sessions.subscribe` registers server-side but stdio can't surface deltas to Claude Code).
 - Tighten Zod schemas for the wrappers added in 0.3.0 — most use `passthrough()` until the gateway shape for each domain is fully nailed down. PRs welcome.
+- HTTP / SSE transport in addition to stdio, to enable Cursor remote and Claude.ai web custom-connector use.
+- Claude Desktop Extension (`.mcpb`) packaging.
 
 ## Migrating from openclaw-claw-mcp (early adopters)
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **README repositioned around the "control plane MCP server" narrative.** New `Without vs with` problem/solution intro, `Quickstart` section with one-click install deeplinks for Cursor (`cursor://anysphere.cursor-deeplink/mcp/install?…`) and VS Code (`vscode:mcp/install?…`), and `claude mcp add` one-liner. The differentiator vs the upstream `openclaw-mcp` (which only wraps `/v1/chat/completions`) is now stated explicitly in the lead paragraph.
+- **`Threat model` section** added — explicit handling of the secret surface (`config.*` / `secrets.*` writes, `openclaw_call` escape hatch, `OPENCLAW_DEVICE_PRIVATE_KEY` env credentials, prompt-injection risk from gateway-returned content), pointer to the GitHub security advisory form.
+- README badges expanded: monthly downloads, Node engine. Roadmap mentions HTTP/SSE transport and Claude Desktop Extension packaging as the next two scope-expanding items.
+
 ### Added
 
 - **Env-based device credentials** for headless / CI usage. `OPENCLAW_DEVICE_PRIVATE_KEY` (base64url Ed25519 seed) and `OPENCLAW_DEVICE_TOKEN`, when set, take priority over the on-disk store. `publicKey` and `deviceId` are derived from the private key, so only one secret needs rotating to change the identity. Optional `OPENCLAW_DEVICE_ROLE` and `OPENCLAW_DEVICE_SCOPES` (comma-separated) override the defaults. Unblocks stateless runners (GitHub Actions, ephemeral containers, service accounts) which previously hit `GatewayError: pairing required` because each invocation generated a fresh ephemeral device. 11 new vitest cases (210 total, was 199).
