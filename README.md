@@ -8,6 +8,8 @@
 
 **The OpenClaw control plane MCP server.** Operate the gateway's full management surface from Claude Code, Cursor, or any MCP client — list and trigger crons, inspect sessions, configure agents and channels, manage skills and secrets, drive the doctor memory plane, pair devices, approve exec/plugin calls. **134 typed tools** covering every JSON-RPC method the gateway publishes.
 
+![demo](docs/assets/demo.gif)
+
 > Different from the upstream [`openclaw-mcp`](https://www.npmjs.com/package/openclaw-mcp), which only wraps `/v1/chat/completions`. This one talks the JSON-RPC protocol used by the OpenClaw Control panel — so you can operate the gateway itself (its crons, sessions, agents, channels, skills, secrets, …), not just chat through it.
 
 ## Without vs with
