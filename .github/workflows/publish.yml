@@ -1,0 +1,65 @@
+# Publish to npm via OIDC Trusted Publishing.
+#
+# Triggered by a git tag matching v*.*.* (semver, including pre-release like
+# v1.0.0-rc.1). The runner authenticates to npm via GitHub's OIDC token, so
+# no NPM_TOKEN secret is required — the package's trusted publisher entry on
+# npmjs.com gates which workflow file in which repo can publish.
+#
+# Pre-requisites (one-time setup on npmjs.com):
+#   1. npm package settings -> Access -> Trusted Publishers -> Add
+#   2. Org:           smurfy92
+#      Repo:          openclaw-control-mcp
+#      Workflow file: publish.yml
+#      Environment:   (leave blank)
+#
+# Local release workflow becomes:
+#   - bump version + CHANGELOG, commit, push
+#   - git tag v0.7.0 && git push --tags
+#   - workflow runs, publishes with provenance attestation
+#   - no OTP prompt, no token to rotate
+
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - run: npm run build
+
+      - name: Verify version match
+        shell: bash
+        run: |
+          PKG=$(jq -r .version package.json)
+          # GITHUB_REF is a native env var injected by Actions (e.g. refs/tags/v0.7.0).
+          # Strip the refs/tags/v prefix to compare with package.json.
+          TAG="${GITHUB_REF#refs/tags/v}"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "version mismatch: tag=$TAG, package.json=$PKG" >&2
+            exit 1
+          fi
+          echo "version match: $PKG"
+
+      - run: npm publish --provenance --access public
